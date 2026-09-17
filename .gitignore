@@ -1,3 +1,6 @@
 node_modules/
 dist/
 *.tsbuildinfo
+# npm test's own scratch build (see tsconfig.test.json) — compiled output,
+# not source, and safe to delete any time.
+.test-out/

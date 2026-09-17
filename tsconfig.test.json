@@ -1,0 +1,19 @@
+{
+  // Compiles the library plus test/**/*.ts to plain .js so `node --test` can
+  // run them directly. Not used for typechecking (tsconfig.json/`npm run
+  // typecheck` owns that) — this exists only because the source can't run
+  // as-is under `node --experimental-strip-types`: SceneObject's constructor
+  // uses a TS parameter property (`constructor(public cfg: C)`), which is
+  // real code generation (it has to emit `this.cfg = cfg`), not mere type
+  // stripping, and Node's strip-only mode explicitly refuses it. Compiling
+  // first sidesteps that; the resulting .js keeps the .js-suffixed relative
+  // imports added for Node ESM (item 6), so it Just Runs under `node --test`
+  // with no loader, no ts-node, no extra runtime dependency.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./.test-out",
+    "rootDir": "."
+  },
+  "include": ["canvas-diagram/**/*", "test/**/*"]
+}
