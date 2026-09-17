@@ -94,6 +94,14 @@ const STARFIELD = {
  * reliable way to derive "this same colour, but transparent" (for a
  * gradient's inner stop) without a CSS colour-parsing dependency. */
 let colorParseCtx: CanvasRenderingContext2D | null = null;
+/** Module-global and shared across every Stage/figure on the page, same as
+ * labels.ts's own measureCache and for the same reason (parsing is the
+ * only real cost here, and the same theme colour is asked for repeatedly).
+ * Left without a size cap or a clear function, unlike measureCache: it's
+ * keyed on *distinct CSS colour strings*, which for any realistic theme
+ * palette — even several figures' worth, each with their own — is a
+ * handful of entries, not a user-influenced, effectively-unbounded set the
+ * way measureCache's label text is. See Stage.destroy()'s own comment. */
 const rgbCache = new Map<string, [number, number, number]>();
 function cssColorRgb(css: string): [number, number, number] {
   const cached = rgbCache.get(css);
@@ -162,11 +170,21 @@ export class Stage {
    * if given, are DOM elements floating over the canvas (button clusters,
    * a legend) that drawLabels()/render() will keep label text clear of —
    * pass the same elements each resize, since their rects are re-measured here.
+   *
+   * Returns whether it actually resized: a canvas under 2px in either
+   * dimension (typically because it's inside a `display: none` tab, an
+   * unopened `<details>`, or hasn't been laid out yet) can't be measured
+   * usefully, so this is a no-op that leaves every field — including
+   * `stars`, still empty on a first call — exactly as it was, and returns
+   * `false` so a caller can tell the difference from a real resize and
+   * retry later (a ResizeObserver firing again once the element actually
+   * gets a size, a tab-shown handler, and so on) rather than silently
+   * rendering a blank figure with no signal anything went wrong.
    */
-  resize(opts: { top?: number; bottom?: number; fitRadius?: number; obstacles?: HTMLElement[] } = {}): void {
+  resize(opts: { top?: number; bottom?: number; fitRadius?: number; obstacles?: HTMLElement[] } = {}): boolean {
     const canvas = this.cfg.canvas;
     const rect = canvas.getBoundingClientRect();
-    if (rect.width < 2 || rect.height < 2) return;
+    if (rect.width < 2 || rect.height < 2) return false;
     const dpr = Math.min(devicePixelRatio || 1, 2);
     this.w = rect.width;
     this.h = rect.height;
@@ -196,6 +214,7 @@ export class Stage {
 
     if (this.stars.length === 0) this.seedStars();
     this.rebuildBackgroundGradients();
+    return true;
   }
 
   seedStars(): void {
@@ -216,6 +235,47 @@ export class Stage {
           depthIndex: layer,
         });
     });
+  }
+
+  /** Change the background theme at runtime — a light/dark toggle, say —
+   * without rebuilding the Stage and losing camera state (`cfg` is
+   * otherwise private, and was set once in the constructor with no way to
+   * change it afterward). Pass `false` to turn the background off entirely.
+   * Rebuilds the dependent gradients (and, lazily, the star-glow sprite) so
+   * the very next drawBackground()/render() call already reflects it. */
+  setBackground(bg: BackgroundTheme | false): void {
+    this.cfg.background = bg;
+    this.rebuildBackgroundGradients();
+  }
+
+  /** Change the zodiac ring at runtime, same idea as setBackground() — pass
+   * `false` to turn it off. There's no cached geometry to rebuild here:
+   * drawZodiac() derives its ring and label boxes fresh from `cfg.zodiac`
+   * every call, so this is just the assignment, exposed alongside
+   * setBackground() for a symmetrical retheming API. */
+  setZodiac(z: ZodiacConfig | false): void {
+    this.cfg.zodiac = z;
+  }
+
+  /** Release this Stage's own resources — the star-glow sprite canvas, the
+   * cached background/vignette gradients, and the star array — for a
+   * caller that creates and tears down many Stages (route changes, several
+   * instances of a figure mounted and unmounted) and doesn't want them to
+   * accumulate. Does not touch the canvas element itself (the caller owns
+   * that) or `cfg`. Does not touch the module-global `rgbCache` (below) or
+   * labels.ts's `measureCache` either — both are deliberately shared across
+   * every Stage/figure on the page, not per-instance state: `rgbCache` is
+   * bounded by the number of *distinct* CSS colour strings any figure ever
+   * asks it to parse, which for a fixed theme palette is a handful, not an
+   * unbounded set, so there's nothing here worth a destroy()-triggered
+   * clear; `measureCache` already caps and clears itself (see its own
+   * comment). A Stage instance that's been destroy()ed is simply done —
+   * build a fresh one (`new Stage(...)`) rather than trying to resurrect it. */
+  destroy(): void {
+    this.starGlowSprite = null;
+    this.washGradient = null;
+    this.vignetteGradient = null;
+    this.stars = [];
   }
 
   private rebuildBackgroundGradients(): void {
@@ -651,6 +711,65 @@ export function wireCamera(opts: CameraWireOptions): () => void {
   canvas.addEventListener('pointercancel', onCancel);
   canvas.addEventListener('pointerleave', onLeave);
 
+  // Keyboard camera control — arrow keys pan, +/- zoom, 0 resets. This
+  // kit's own convention (see CanvasDiagramDemo.astro's `.stage`) is that
+  // the *canvas's wrapper*, not the canvas itself, carries `tabindex="0"`
+  // and the aria-label, so the listener lives on `window` (keydown doesn't
+  // bubble down from an ancestor into the canvas the way it would bubble
+  // up) and is gated on focus itself: `isCanvasFocused()` is true whenever
+  // the focused element either *is* the canvas or has the canvas somewhere
+  // inside it (`Node.contains()` includes the node itself), covering both
+  // "the canvas is directly focusable" and "a wrapper around it is."
+  // `preventDefault()` — and `onChange()` — fire only for a key this
+  // handler actually understands, so every other key (Tab, a modifier
+  // combo, a browser shortcut, or an arrow key while focus is genuinely
+  // elsewhere on the page) passes through untouched.
+  const KEY_PAN_PX = 40;
+  const KEY_ZOOM_FACTOR = 1.2;
+  const isCanvasFocused = () => document.activeElement !== null && document.activeElement.contains(canvas);
+  // Captured once, at wire-up time — by convention a caller resizes/fits
+  // the Stage (which seeds camera.zoom/pan) *before* calling wireCamera(),
+  // so this is "the view this figure opened with." A resize after this
+  // point (a window resize re-fitting the Stage, say) isn't reflected in
+  // what '0' resets to; that's an acceptable gap for a keyboard nicety, not
+  // a promise this function makes about tracking a moving target.
+  const resetTo = { zoom: camera.zoom, pan: { x: camera.pan.x, y: camera.pan.y } };
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (!isCanvasFocused()) return;
+    switch (e.key) {
+      case 'ArrowLeft':
+        panBy(camera, -KEY_PAN_PX, 0);
+        break;
+      case 'ArrowRight':
+        panBy(camera, KEY_PAN_PX, 0);
+        break;
+      case 'ArrowUp':
+        panBy(camera, 0, -KEY_PAN_PX);
+        break;
+      case 'ArrowDown':
+        panBy(camera, 0, KEY_PAN_PX);
+        break;
+      case '+':
+      case '=': // the unshifted key '+' shares a key with, on most layouts
+        zoomAt(camera, 0, 0, KEY_ZOOM_FACTOR, minZoom(), maxZoom());
+        break;
+      case '-':
+      case '_':
+        zoomAt(camera, 0, 0, 1 / KEY_ZOOM_FACTOR, minZoom(), maxZoom());
+        break;
+      case '0':
+        camera.zoom = resetTo.zoom;
+        camera.pan.x = resetTo.pan.x;
+        camera.pan.y = resetTo.pan.y;
+        break;
+      default:
+        return; // not a key this handler understands — leave it alone
+    }
+    e.preventDefault();
+    opts.onChange?.();
+  };
+  window.addEventListener('keydown', onKeyDown);
+
   return () => {
     canvas.removeEventListener('wheel', onWheel);
     canvas.removeEventListener('pointerdown', onDown);
@@ -660,5 +779,72 @@ export function wireCamera(opts: CameraWireOptions): () => void {
     canvas.removeEventListener('pointerleave', onLeave);
     window.removeEventListener('resize', invalidateRect);
     window.removeEventListener('scroll', invalidateRect, true);
+    window.removeEventListener('keydown', onKeyDown);
+  };
+}
+
+/**
+ * The forever-`requestAnimationFrame` loop every figure in this style
+ * otherwise hand-rolls, replaced with one that pauses itself rather than
+ * burning a frame budget the user can't see or doesn't want: an
+ * `IntersectionObserver` stops it while `target` is scrolled out of view,
+ * and `matchMedia('(prefers-reduced-motion: reduce)')` — tracked live, not
+ * just read once at start — stops it entirely in favour of a single static
+ * frame when the user's OS-level setting asks for that. Neither of those
+ * has anything to do with *interaction*-driven redraws — a hover, a drag,
+ * a click still calls `onFrame` straight from wireCamera's own
+ * `onChange`/`onHover` handlers, same as always, whether or not this loop
+ * is currently running — so reduced motion means "the scene stops
+ * animating on its own clock," not "the figure stops responding."
+ *
+ * `onFrame` receives the `requestAnimationFrame` timestamp (ms since page
+ * load, same as `performance.now()`) so a diagram driven by wall-clock time
+ * doesn't need its own `performance.now()` bookkeeping; a diagram driven by
+ * something else (a simulated clock, a scrubber) can simply ignore it.
+ */
+export function wireAnimationLoop(target: Element, onFrame: (t: number) => void): () => void {
+  const reduceMotionQuery = matchMedia('(prefers-reduced-motion: reduce)');
+  let reduceMotion = reduceMotionQuery.matches;
+  let visible = true;
+  let raf = 0;
+
+  const tick = (t: number) => {
+    onFrame(t);
+    raf = visible && !reduceMotion ? requestAnimationFrame(tick) : 0;
+  };
+  const start = () => {
+    if (raf === 0 && visible && !reduceMotion) raf = requestAnimationFrame(tick);
+  };
+  const stop = () => {
+    if (raf !== 0) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+  };
+
+  const io = new IntersectionObserver((entries) => {
+    // Only one entry: `target` is the only element passed to observe().
+    visible = entries[entries.length - 1]?.isIntersecting ?? true;
+    if (visible) start();
+    else stop();
+  });
+  io.observe(target);
+
+  const onMotionChange = () => {
+    reduceMotion = reduceMotionQuery.matches;
+    if (reduceMotion) {
+      stop();
+      onFrame(performance.now()); // one last static frame, not a blank one
+    } else start();
+  };
+  reduceMotionQuery.addEventListener('change', onMotionChange);
+
+  if (reduceMotion) onFrame(performance.now());
+  else start();
+
+  return () => {
+    stop();
+    io.disconnect();
+    reduceMotionQuery.removeEventListener('change', onMotionChange);
   };
 }

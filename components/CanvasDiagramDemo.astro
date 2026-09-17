@@ -21,7 +21,7 @@
     class="stage"
     data-stage
     tabindex="0"
-    aria-label="A worked example of the scene object model: nested spheres, an eccentric sun, and a moon epicycle. Drag to pan, scroll to zoom, hover a body for what it is, click a body to identify it."
+    aria-label="A worked example of the scene object model: nested spheres, an eccentric sun, and a moon epicycle. Drag to pan, scroll to zoom, hover a body for what it is, click a body to identify it. Arrow keys pan, plus and minus zoom, 0 resets, once this has focus."
   >
     <canvas data-canvas></canvas>
     <div class="hover-tip" data-hover-tip hidden>
@@ -37,8 +37,20 @@
     between the sun and moon is an <code>Angle</code> pointed at two other
     objects; the moon's tail is a <code>Trail</code> given only a target and
     a span. Hover anything for its description, click a body to identify it
-    below; drag to pan, scroll to zoom.
+    below; drag to pan, scroll to zoom, or use arrow keys/+/-/0 once the
+    figure has focus.
   </figcaption>
+  <!-- A canvas figure has nothing for a screen reader to read on its own —
+       this is the text alternative: every object's name and description,
+       the same data each hover tooltip/click already surfaces visually,
+       laid out as an ordinary (visually hidden) list rather than locked
+       inside pixels. Populated from scene.all() once the scene is built,
+       so it never drifts out of sync with what's actually declared. -->
+  <ul class="visually-hidden" data-object-list></ul>
+  <!-- Announces whatever's currently hovered/selected, mirroring the visual
+       hover tooltip and the click-flash readout for anyone not using a
+       pointer to discover them. -->
+  <div class="visually-hidden" aria-live="polite" data-live-region></div>
 </figure>
 
 <style>
@@ -107,6 +119,21 @@
   figcaption code {
     font-size: 0.85em;
   }
+
+  /* Standard clip-based hiding — not display:none/visibility:hidden, both of
+     which would also hide the content from screen readers, defeating the
+     point of the object list and live region this is for. */
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
 </style>
 
 <script>
@@ -122,6 +149,7 @@
     Stage,
     Trail,
     nester,
+    wireAnimationLoop,
     wireCamera,
     type BodyRenderer,
     type SceneTheme,
@@ -388,9 +416,23 @@
     const tipText = root.querySelector<HTMLElement>('[data-hover-tip-text]')!;
     const tipSub = root.querySelector<HTMLElement>('[data-hover-tip-sub]')!;
     const readoutEl = root.querySelector<HTMLElement>('[data-readout]')!;
+    const objectListEl = root.querySelector<HTMLElement>('[data-object-list]')!;
+    const liveRegionEl = root.querySelector<HTMLElement>('[data-live-region]')!;
 
     const hover = new HoverController({ root: tipEl, text: tipText, sub: tipSub });
     const { scene, earth, moon, outerRadius } = buildScene();
+
+    // The screen-reader text alternative for the whole figure: every named
+    // object's name and description, the same data the hover tooltip and
+    // click-flash readout already surface visually (see Meta.description).
+    // Built straight from the Scene rather than kept as a second, parallel
+    // list, so it can never drift out of sync with what's actually declared.
+    for (const item of scene.all()) {
+      if (!item.name) continue;
+      const li = document.createElement('li');
+      li.textContent = item.cfg.description ? `${item.name}: ${item.cfg.description}` : item.name;
+      objectListEl.appendChild(li);
+    }
 
     const stage = new Stage({
       canvas,
@@ -430,6 +472,13 @@
     let clickFlashUntil = 0;
     let lastReadoutAt = 0;
     const READOUT_HZ_MS = 100;
+    // The last hover zone id announced to the live region — read back so a
+    // hover that hasn't changed since last frame doesn't re-announce itself
+    // every frame (an aria-live region re-reading the same text on every
+    // paint would be at best noisy, at worst silent — screen readers
+    // commonly skip announcing unchanged content, but re-setting identical
+    // textContent isn't guaranteed to be treated as unchanged).
+    let lastAnnouncedId: string | null = null;
 
     function draw() {
       const t = clock();
@@ -437,6 +486,12 @@
       // `ref: earth` — Stage/Scene resolve a PointLike themselves; no
       // `earth.position(f)` call needed at the draw call's own top level.
       stage.render({ scene, f, ref: earth, theme: THEME, hover, pointer, lightSource: sun });
+
+      if (hover.hoverId !== lastAnnouncedId) {
+        lastAnnouncedId = hover.hoverId;
+        const zone = hover.hoverZone;
+        liveRegionEl.textContent = zone ? (zone.sub ? `${zone.text}: ${zone.sub}` : zone.text) : '';
+      }
 
       if (t * 1000 - lastReadoutAt > READOUT_HZ_MS) {
         lastReadoutAt = t * 1000;
@@ -454,8 +509,10 @@
       camera: stage.camera,
       minZoom: () => stage.fit * 0.5,
       maxZoom: () => stage.fit * 8,
+      onChange: draw,
       onHover: (p) => {
         pointer = p;
+        draw();
       },
       onPointerDown: () => stageEl.focus({ preventScroll: true }),
       // Scene.hitTest() — a click handler asks "what did I hit" without
@@ -466,34 +523,46 @@
         if (hit) {
           clickFlash = `clicked: ${hit.name}`;
           clickFlashUntil = t + 1.5;
+          const desc = hit.cfg.description;
+          liveRegionEl.textContent = desc ? `selected: ${hit.name}: ${desc}` : `selected: ${hit.name}`;
         }
       },
     });
 
-    let raf = requestAnimationFrame(function tick() {
-      draw();
-      raf = requestAnimationFrame(tick);
-    });
+    // Runs the diagram's own clock; pauses itself off-screen and under
+    // prefers-reduced-motion (still leaving draw() reachable from the
+    // pointer/keyboard handlers above, so the figure keeps responding to
+    // interaction even while its own animation is paused — see
+    // wireAnimationLoop's own doc).
+    const unwireLoop = wireAnimationLoop(stageEl, draw);
 
     return () => {
-      cancelAnimationFrame(raf);
+      unwireLoop();
       ro.disconnect();
       unwireCamera();
+      stage.destroy();
     };
   }
 
-  let teardown: (() => void) | null = null;
+  // Keyed by root rather than a single `teardown` variable — this
+  // component's internals are already root-scoped (every querySelector
+  // above reads from `root`, not `document`), so the only thing standing
+  // between "one instance on the page" and "several" was this bootstrap
+  // using querySelector (singular) instead of querySelectorAll: with more
+  // than one `[data-scene-demo]` on a page, only the first ever initialised.
+  const teardowns = new Map<HTMLElement, () => void>();
 
   function boot() {
-    teardown?.();
-    teardown = null;
-    const root = document.querySelector<HTMLElement>('[data-scene-demo]');
-    if (root) teardown = init(root);
+    for (const teardown of teardowns.values()) teardown();
+    teardowns.clear();
+    for (const root of document.querySelectorAll<HTMLElement>('[data-scene-demo]')) {
+      teardowns.set(root, init(root));
+    }
   }
 
   document.addEventListener('astro:page-load', boot);
   document.addEventListener('astro:before-swap', () => {
-    teardown?.();
-    teardown = null;
+    for (const teardown of teardowns.values()) teardown();
+    teardowns.clear();
   });
 </script>
