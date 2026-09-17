@@ -1,0 +1,21 @@
+{
+  "name": "celestial-geometry-framework",
+  "version": "0.1.0",
+  "description": "A kit for interactive celestial/geometric canvas figures: pan/zoom camera, angle constructions, collision-avoiding label layout, and hover-to-explain diagrams.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "exports": {
+    ".": "./canvas-diagram/index.ts",
+    "./scene": "./canvas-diagram/scene/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --experimental-strip-types --test test/**/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.7"
+  }
+}

@@ -5,8 +5,8 @@
  * can be hovered and labelled exactly like a Sphere's carried body.
  */
 
-import type { Vec } from '../geometry';
-import { type Frame, type Meta, type PointLike, type Positioned, ORIGIN, SceneObject, resolvePoint } from './types';
+import type { Vec } from '../geometry.js';
+import { type Frame, type Meta, type PointLike, type Positioned, ORIGIN, SceneObject, resolvePoint } from './types.js';
 
 export interface AnchorConfig extends Meta {
   /** where it sits — fixed, or itself riding another object. Default: the origin. */

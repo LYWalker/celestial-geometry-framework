@@ -9,7 +9,7 @@
  * algebra: zoom in on the wheel, and the view holds still under the cursor.
  */
 
-import type { Vec } from './geometry';
+import type { Vec } from './geometry.js';
 
 export interface Camera {
   zoom: number;

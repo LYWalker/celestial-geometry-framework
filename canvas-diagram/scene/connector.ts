@@ -6,7 +6,7 @@
  * and where they are at a given moment is never something they compute by hand.
  */
 
-import { polar, type Vec } from '../geometry';
+import { polar, type Vec } from '../geometry.js';
 import {
   type DirectionLike,
   type Frame,
@@ -17,7 +17,7 @@ import {
   resolveDirection,
   resolvePoint,
   resolveScalar,
-} from './types';
+} from './types.js';
 
 export interface ConnectorConfig extends Meta {
   from: PointLike;
@@ -59,14 +59,25 @@ export class Connector extends SceneObject<ConnectorConfig> {
     }
   }
 
+  /** Force the next fromAt()/toAt()/draw() call to re-resolve both ends,
+   * even within the same Frame object — see Sphere.invalidate()'s own doc;
+   * same `cfg`-mutation contract, same escape hatch. */
+  invalidate(): void {
+    this.memoFrame = null;
+  }
+
   fromAt(f: Frame): Vec {
     this.resolve(f);
-    return this.memoFrom!;
+    // Copied out, not handed back by reference — same reasoning as
+    // Sphere.centerAt()/position(): this is our own memo, read again by
+    // draw()/toAt() and by Scene for the rest of the frame, and a caller
+    // mutating what fromAt() returns would otherwise corrupt it for them.
+    return { x: this.memoFrom!.x, y: this.memoFrom!.y };
   }
 
   toAt(f: Frame): Vec {
     this.resolve(f);
-    return this.memoTo!;
+    return { x: this.memoTo!.x, y: this.memoTo!.y };
   }
 
   private resolve(f: Frame): void {
@@ -97,13 +108,13 @@ export class Connector extends SceneObject<ConnectorConfig> {
     return { x: a.x + p.x, y: a.y + p.y };
   }
 
-  /** `colour`, if given, wins over `cfg.color` — see Angle.draw's own note;
-   * same reasoning, same fix. */
-  draw(ctx: CanvasRenderingContext2D, f: Frame, zoom: number, colour?: string): void {
+  /** This call's own `color` argument, if given, wins over `cfg.color` — see
+   * Angle.draw's own note; same reasoning, same fix. */
+  draw(ctx: CanvasRenderingContext2D, f: Frame, zoom: number, color?: string): void {
     const a = this.fromAt(f);
     const b = this.toAt(f);
     ctx.save();
-    ctx.strokeStyle = colour ?? this.cfg.color ?? '#fff';
+    ctx.strokeStyle = color ?? this.cfg.color ?? '#fff';
     ctx.lineWidth = (this.cfg.lineWidth ?? 1) / zoom;
     if (this.cfg.dashed) ctx.setLineDash([6 / zoom, 5 / zoom]);
     ctx.beginPath();

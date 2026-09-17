@@ -55,9 +55,13 @@ export function distToSegment(p: Vec, a: Vec, b: Vec): number {
 
 /** Shortest distance from p to a polyline — or, for a single point, to that point. */
 export function distToPolyline(p: Vec, pts: Vec[]): number {
-  if (pts.length === 1) return Math.hypot(p.x - pts[0].x, p.y - pts[0].y);
+  // The `!`s below are both guaranteed by the surrounding bounds check, not
+  // hopeful casts: length === 1 guarantees index 0 exists, and the loop
+  // condition (i < pts.length - 1) guarantees i + 1 is always in range —
+  // noUncheckedIndexedAccess just can't see either invariant from here.
+  if (pts.length === 1) return Math.hypot(p.x - pts[0]!.x, p.y - pts[0]!.y);
   let best = Infinity;
-  for (let i = 0; i < pts.length - 1; i++) best = Math.min(best, distToSegment(p, pts[i], pts[i + 1]));
+  for (let i = 0; i < pts.length - 1; i++) best = Math.min(best, distToSegment(p, pts[i]!, pts[i + 1]!));
   return best;
 }
 

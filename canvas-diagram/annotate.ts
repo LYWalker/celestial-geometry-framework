@@ -6,7 +6,7 @@
  * 8′ added to the mean" is a sweep() with a mark() beside it.
  */
 
-import { DEG, norm360, polar, type Vec } from './geometry';
+import { DEG, norm360, polar, type Vec } from './geometry.js';
 
 /** Below this screen-px arc width, the arrowhead is suppressed rather than
  * drawn illegibly small. */

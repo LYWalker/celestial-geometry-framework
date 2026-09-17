@@ -21,7 +21,7 @@
  * position(f) is always "where the thing on it actually is."
  */
 
-import { polar, norm360, type Vec } from '../geometry';
+import { polar, norm360, type Vec } from '../geometry.js';
 import {
   type BodyRenderer,
   type BoolLike,
@@ -37,7 +37,7 @@ import {
   resolveDirection,
   resolvePoint,
   resolveScalar,
-} from './types';
+} from './types.js';
 
 export interface EccentricConfig {
   /** the offset as a fraction of this sphere's own radius (0–1) — a plain
@@ -115,10 +115,15 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
   // a few epicycles deep, backed by a real ephemeris function, not cheap
   // wasted work. A new Frame object invalidates the cache automatically.
   private memoFrame: Frame | null = null;
-  private memoCenter?: Vec;
-  private memoRadius?: number;
-  private memoAngle?: number;
-  private memoPosition?: Vec;
+  // Explicit `| undefined` rather than the `?:` shorthand: resetIfStale()
+  // below assigns `undefined` to all four outright to invalidate them, which
+  // exactOptionalPropertyTypes treats as a different (and, for a private
+  // field only ever read after resetIfStale() has run, more honest) type
+  // than "the property may be omitted."
+  private memoCenter: Vec | undefined;
+  private memoRadius: number | undefined;
+  private memoAngle: number | undefined;
+  private memoPosition: Vec | undefined;
 
   constructor(cfg: SphereConfig) {
     super(cfg);
@@ -134,6 +139,17 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
       this.memoFrame = f;
       this.memoCenter = this.memoRadius = this.memoAngle = this.memoPosition = undefined;
     }
+  }
+
+  /** Force the next `radiusAt()`/`centerAt()`/`angleAt()`/`position()` call
+   * to recompute, even within the *same* Frame object — the escape hatch
+   * for `cfg`'s own contract (see `SceneObject`'s doc, and the README):
+   * `cfg` is public and author-writable, but this sphere's memo otherwise
+   * has no way to know a field changed mid-frame (a UI control's change
+   * handler firing between two draw() calls that share a Frame, say).
+   * Mutate `cfg`, then call `invalidate()`. */
+  invalidate(): void {
+    this.memoFrame = null;
   }
 
   get showBody(): boolean {
@@ -169,7 +185,14 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
         this.memoCenter = { x: base.x + off.x, y: base.y + off.y };
       }
     }
-    return this.memoCenter;
+    // Copied out, not handed back by reference: the memo above is our own
+    // cached state, read again by every child riding this sphere for the
+    // rest of the frame — a caller that mutates what centerAt() returns
+    // (directly, or via a library that mutates points in place) would
+    // otherwise corrupt that cache for everyone downstream. Same fix, same
+    // reasoning, as the "copied, not aliased" comment just above for the
+    // memo's own construction; the miss was only ever on the way out.
+    return { x: this.memoCenter.x, y: this.memoCenter.y };
   }
 
   /** The carried point's bearing — from `angle` if given, else a constant
@@ -200,7 +223,10 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
         this.memoPosition = { x: c.x + p.x, y: c.y + p.y };
       }
     }
-    return this.memoPosition;
+    // Copied out, not handed back by reference — see centerAt()'s own note;
+    // same hazard (this is the memo a whole chain of dependents reads back
+    // for the rest of the frame), same fix.
+    return { x: this.memoPosition.x, y: this.memoPosition.y };
   }
 }
 

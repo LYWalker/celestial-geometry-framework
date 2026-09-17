@@ -9,12 +9,12 @@
  * and the two decorations almost every figure wants.
  */
 
-import { DEG, FULL_CIRCLE, type Box, type Vec } from '../geometry';
-import { panBy, pinchAt, worldToScreen, zoomAt, type Camera } from '../camera';
-import { drawLabels as drawLabelsKit, type Face, type Label, type LabelTheme } from '../labels';
-import type { HoverController } from '../hover';
-import type { Scene, SceneTheme } from './scene';
-import { ORIGIN, resolvePoint, type Frame, type PointLike } from './types';
+import { DEG, FULL_CIRCLE, type Box, type Vec } from '../geometry.js';
+import { panBy, pinchAt, worldToScreen, zoomAt, type Camera } from '../camera.js';
+import { drawLabels as drawLabelsKit, type Face, type Label, type LabelTheme } from '../labels.js';
+import type { HoverController } from '../hover.js';
+import type { Scene, SceneTheme } from './scene.js';
+import { ORIGIN, resolvePoint, type Frame, type PointLike } from './types.js';
 
 export interface BackgroundTheme {
   /** the gradient behind the whole stage, centre to edge */
@@ -109,7 +109,9 @@ function cssColorRgb(css: string): [number, number, number] {
     colorParseCtx.fillStyle = css;
     colorParseCtx.fillRect(0, 0, 1, 1);
     const d = colorParseCtx.getImageData(0, 0, 1, 1).data;
-    rgb = [d[0], d[1], d[2]];
+    // A 1x1 getImageData() always yields exactly 4 bytes (RGBA) — the `!`s
+    // just satisfy noUncheckedIndexedAccess.
+    rgb = [d[0]!, d[1]!, d[2]!];
   }
   rgbCache.set(css, rgb);
   return rgb;
@@ -198,8 +200,11 @@ export class Stage {
 
   seedStars(): void {
     this.stars = [];
+    // STAR_DEPTHS and STAR_COUNTS are parallel, same-length arrays by
+    // construction (see their declarations above) — `layer`, an index into
+    // STAR_DEPTHS, is always a valid index into STAR_COUNTS too.
     STAR_DEPTHS.forEach((_depth, layer) => {
-      const n = STAR_COUNTS[layer];
+      const n = STAR_COUNTS[layer]!;
       for (let i = 0; i < n; i++)
         this.stars.push({
           x: (Math.random() - 0.5) * STARFIELD.extent,
@@ -276,8 +281,11 @@ export class Stage {
     const kByDepth = STAR_DEPTHS.map((d) => 0.5 * Math.pow(zr, d));
 
     for (const s of this.stars) {
-      const depth = STAR_DEPTHS[s.depthIndex];
-      const k = kByDepth[s.depthIndex];
+      // s.depthIndex is always a valid STAR_DEPTHS/kByDepth index — it's set
+      // from seedStars()'s own STAR_DEPTHS.forEach index above and never
+      // touched anywhere else.
+      const depth = STAR_DEPTHS[s.depthIndex]!;
+      const k = kByDepth[s.depthIndex]!;
       const p = { x: cam.cx + cam.pan.x * depth + s.x * k, y: cam.cy + cam.pan.y * depth + s.y * k };
       if (p.x < -4 || p.x > w + 4 || p.y < -4 || p.y > h + 4) continue;
       const a = s.a * (STARFIELD.twinkleBase + STARFIELD.twinkleDepth * Math.sin(t * STARFIELD.twinkleRate + s.tw));
@@ -311,7 +319,7 @@ export class Stage {
    * the screen boxes its labels occupy, for a Scene's own labels to avoid;
    * you don't need to collect this yourself if you use `drawLabels()`/`render()`.
    */
-  drawZodiac(f: Frame, ref: Vec, opts: { alpha?: number; labels?: boolean } = {}): Box[] {
+  drawZodiac(f: Frame, ref: Vec, opts: { alpha?: number | undefined; labels?: boolean | undefined } = {}): Box[] {
     this.zodiacBoxes = [];
     const z = this.cfg.zodiac;
     if (!z) return [];
@@ -328,10 +336,10 @@ export class Stage {
     if (R2 > Math.hypot(this.w, this.h) * 3) return [];
 
     const n = z.segments.length;
-    const colour = z.color ?? 'rgba(150,168,214,0.2)';
+    const color = z.color ?? 'rgba(150,168,214,0.2)';
     ctx.save();
     ctx.globalAlpha = alpha;
-    ctx.strokeStyle = colour;
+    ctx.strokeStyle = color;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.arc(cx, cy, R, 0, FULL_CIRCLE);
@@ -352,13 +360,14 @@ export class Stage {
       const Rl = (R + R2) / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = colour;
+      ctx.fillStyle = color;
       ctx.font = (z.font ?? { css: '600 9.5px system-ui, sans-serif', px: 9.5 }).css;
       for (let i = 0; i < n; i++) {
         const a = ((i + 0.5) * 360) / n;
         const p = { x: cx + Rl * Math.cos(a * DEG), y: cy - Rl * Math.sin(a * DEG) };
         if (p.x < -50 || p.x > this.w + 50 || p.y < -20 || p.y > this.h + 20) continue;
-        const name = z.segments[i].name.toUpperCase();
+        // i < n === z.segments.length, so this index is always in range.
+        const name = z.segments[i]!.name.toUpperCase();
         ctx.fillText(name, p.x, p.y);
         const w = ctx.measureText(name).width;
         this.zodiacBoxes.push({ x: p.x - w / 2, y: p.y - 6, w, h: 12 });
@@ -531,6 +540,11 @@ export function wireCamera(opts: CameraWireOptions): () => void {
   let pinchMid = { x: 0, y: 0 };
   const pinchOf = () => {
     const [a, b] = [...pointers.values()];
+    // Only ever called from onDown/onMove after checking pointers.size === 2
+    // — an internal invariant, not something a caller outside this closure
+    // can violate, so a thrown assertion (rather than a silent fallback)
+    // is the right way to catch a regression in that invariant early.
+    if (!a || !b) throw new Error(`canvas-diagram wireCamera: pinchOf() needs 2 active pointers, had ${pointers.size}`);
     return { dist: Math.hypot(a.x - b.x, a.y - b.y), mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
   };
 
@@ -606,8 +620,9 @@ export function wireCamera(opts: CameraWireOptions): () => void {
   const endDrag = (e: PointerEvent) => {
     pointers.delete(e.pointerId);
     if (pointers.size === 1) {
+      // pointers.size === 1 just above guarantees this destructure succeeds.
       const [p] = [...pointers.values()];
-      last = p;
+      last = p!;
       dragging = true;
       dragMoved = true;
       return;

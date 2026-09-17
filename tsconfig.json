@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    // Both of these catch the same class of hazard — code that reads as
+    // `T` but is quietly `T | undefined` at runtime — for the two shapes it
+    // actually shows up in here: array indexing (noUncheckedIndexedAccess)
+    // and object literals built with an explicit `undefined` for an
+    // optional field (exactOptionalPropertyTypes), e.g. Trail's per-sample
+    // Frame spread or Scene's per-item Label construction. Turning both on
+    // surfaced ~75 real sites; each is fixed with either a `!` and a
+    // one-line comment naming the invariant that makes it safe (the
+    // overwhelming majority — a loop bound, a just-checked `.length`, a
+    // parallel-array relationship) or, where the `undefined` was legitimate
+    // and not a bug, by widening the field's own type to `T | undefined`
+    // rather than conditionally spreading the key away in a per-frame hot
+    // path. See the P0 review that produced this file for the original
+    // hazard list, and the corresponding commit for the fixes.
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["canvas-diagram/**/*"]
+}

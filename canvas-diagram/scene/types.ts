@@ -24,8 +24,8 @@
  * Sphere) instead of re-walking a chain of parents on every read.
  */
 
-import { type Vec, dot, lonOf, sub } from '../geometry';
-import type { Camera } from '../camera';
+import { type Vec, dot, lonOf, sub } from '../geometry.js';
+import type { Camera } from '../camera.js';
 
 export interface Frame {
   /** the diagram's clock — whatever unit its speeds are stated in */
@@ -76,10 +76,41 @@ export function resolveScalar(s: Scalar, f: Frame): number {
   return typeof s === 'function' ? s(f) : s;
 }
 
+/** How deep a chain of `center`/`at`/PointLike references may nest before
+ * resolvePoint() gives up and throws, rather than recursing forever. No
+ * legitimate diagram in this kit's style nests anywhere near this deep (the
+ * Rambam figures top out around 3–4: earth → large circle → small circle →
+ * carried body) — this exists purely to catch the easy authoring mistake of
+ * a cycle (`a.cfg.center = b; b.cfg.center = a`), which without a guard
+ * recurses through position()/centerAt() until the JS stack overflows with
+ * a generic, unhelpful `RangeError: Maximum call stack size exceeded`. */
+const MAX_RESOLUTION_DEPTH = 64;
+let resolutionDepth = 0;
+
 export function resolvePoint(p: PointLike | undefined, f: Frame): Vec {
   if (p === undefined) return { x: 0, y: 0 };
   if (typeof p === 'function') return p(f);
-  if ('position' in p) return p.position(f);
+  if ('position' in p) {
+    if (resolutionDepth >= MAX_RESOLUTION_DEPTH) {
+      // Not necessarily this object's own fault — it's just the one that
+      // pushed a chain already MAX_RESOLUTION_DEPTH deep over the edge —
+      // but its id is still the most useful thing to name, since it's the
+      // object nearest wherever a `center`/`at` chain (accidentally) loops.
+      const maybeId = (p as { id?: unknown }).id;
+      const id = typeof maybeId === 'string' ? maybeId : '(no id)';
+      throw new Error(
+        `canvas-diagram: PointLike resolution nested ${MAX_RESOLUTION_DEPTH} levels deep while resolving "${id}" — ` +
+          `this almost always means a cyclic reference (e.g. \`a.cfg.center = b; b.cfg.center = a\`), not a ` +
+          `legitimately deep scene. Check the chain of \`center\`/\`at\`/PointLike fields leading to "${id}".`,
+      );
+    }
+    resolutionDepth++;
+    try {
+      return p.position(f);
+    } finally {
+      resolutionDepth--;
+    }
+  }
   return p;
 }
 
@@ -227,9 +258,7 @@ export interface BodyRenderContext {
   f: Frame;
   camera: Camera;
   /** matches the object's `color` config — named to agree with what an
-   * author already wrote on the Sphere, not with this kit's internal
-   * British spelling (Label.colour, HoverZone.colour) that a BodyRenderer
-   * never touches */
+   * author already wrote on the Sphere */
   color: string;
   /** under the pointer this frame */
   hot: boolean;
@@ -238,8 +267,13 @@ export interface BodyRenderContext {
    * some of its layers (a glow) at a different alpha than its disc */
   alpha: number;
   /** unit vector, screen space, from this body toward the scene's light
-   * source — set only when the Scene draw call was given one */
-  light?: Vec;
+   * source — set only when the Scene draw call was given one. Widened to
+   * `| undefined` (not just an omittable key) under
+   * exactOptionalPropertyTypes: Scene builds this object with `light:
+   * lightScreen !== undefined ? unit(...) : undefined` rather than
+   * conditionally spreading the key away, since this literal is built once
+   * per body per frame. */
+  light?: Vec | undefined;
 }
 
 export type BodyRenderer = (ctx: CanvasRenderingContext2D, b: BodyRenderContext) => void;

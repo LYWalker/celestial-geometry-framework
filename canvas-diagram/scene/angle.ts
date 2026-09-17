@@ -7,8 +7,8 @@
  * computed, never hand-drawn.
  */
 
-import { norm360, polar, type Vec } from '../geometry';
-import { sweep, sweepShort, midOf } from '../annotate';
+import { norm360, polar, type Vec } from '../geometry.js';
+import { sweep, sweepShort, midOf } from '../annotate.js';
 import {
   type DirectionLike,
   type Frame,
@@ -19,7 +19,7 @@ import {
   resolveDirection,
   resolvePoint,
   resolveScalar,
-} from './types';
+} from './types.js';
 
 export interface AngleConfig extends Meta {
   vertex: PointLike;
@@ -76,6 +76,13 @@ export class Angle extends SceneObject<AngleConfig> {
   private memoFrame: Frame | null = null;
   private memoSweep?: Sweep;
 
+  /** Force the next draw()/hoverPts()/midAt()/valueAt() call to re-derive
+   * the sweep, even within the same Frame object — see Sphere.invalidate()'s
+   * own doc; same `cfg`-mutation contract, same escape hatch. */
+  invalidate(): void {
+    this.memoFrame = null;
+  }
+
   vertexAt(f: Frame): Vec {
     return resolvePoint(this.cfg.vertex, f);
   }
@@ -117,13 +124,14 @@ export class Angle extends SceneObject<AngleConfig> {
   }
 
   /** Draw the arc and arrowhead. Call inside the caller's applyCamera block.
-   * `colour`, if given, wins over `cfg.color` — Scene passes its own
-   * already-themed fallback here, so a figure's stroke and its label/hover
-   * colour for the same object never drift onto two different defaults. */
-  draw(ctx: CanvasRenderingContext2D, f: Frame, zoom: number, colour?: string): void {
+   * This call's own `color` argument, if given, wins over `cfg.color` —
+   * Scene passes its own already-themed fallback here, so a figure's stroke
+   * and its label/hover color for the same object never drift onto two
+   * different defaults. */
+  draw(ctx: CanvasRenderingContext2D, f: Frame, zoom: number, color?: string): void {
     const { c, r, from, to, cw } = this.sweepOf(f);
     ctx.save();
-    ctx.strokeStyle = colour ?? this.cfg.color ?? '#fff';
+    ctx.strokeStyle = color ?? this.cfg.color ?? '#fff';
     ctx.lineWidth = (this.cfg.lineWidth ?? 1) / zoom;
     if (this.cfg.short ?? true) sweepShort(ctx, c, r, from, to, zoom);
     else sweep(ctx, c, r, from, to, zoom, cw);

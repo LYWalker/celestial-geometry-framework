@@ -36,11 +36,11 @@
  * `sunShell.position(f)` (what actually gets drawn and hovered) is derived.
  */
 
-export * from './types';
-export * from './anchor';
-export * from './sphere';
-export * from './angle';
-export * from './connector';
-export * from './trail';
-export * from './scene';
-export * from './stage';
+export * from './types.js';
+export * from './anchor.js';
+export * from './sphere.js';
+export * from './angle.js';
+export * from './connector.js';
+export * from './trail.js';
+export * from './scene.js';
+export * from './stage.js';

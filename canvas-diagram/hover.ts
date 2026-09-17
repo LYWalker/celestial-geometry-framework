@@ -7,7 +7,7 @@
  * however it builds its own Label list — the two are usually the same call.
  */
 
-import { distToPolyline, FULL_CIRCLE, type Vec } from './geometry';
+import { distToPolyline, FULL_CIRCLE, type Vec } from './geometry.js';
 
 /** update()'s default proximity threshold, screen px. */
 export const HOVER_THRESHOLD_PX = 12;
@@ -18,12 +18,15 @@ export const HOVER_THRESHOLD_PX = 12;
  * module and importing it back the other way would invert that dependency). */
 function traceSmoothCurve(ctx: CanvasRenderingContext2D, pts: Vec[]): void {
   const n = pts.length;
-  ctx.moveTo(pts[0].x, pts[0].y);
+  // Only called with n > 1 (see drawHighlight's own length check below), and
+  // every index below — 0, i, i+1, and i-1/i+2 clamped into [0, n-1] — is in
+  // range by construction; the `!`s just tell noUncheckedIndexedAccess that.
+  ctx.moveTo(pts[0]!.x, pts[0]!.y);
   for (let i = 0; i < n - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)];
-    const p1 = pts[i];
-    const p2 = pts[i + 1];
-    const p3 = pts[Math.min(n - 1, i + 2)];
+    const p0 = pts[Math.max(0, i - 1)]!;
+    const p1 = pts[i]!;
+    const p2 = pts[i + 1]!;
+    const p3 = pts[Math.min(n - 1, i + 2)]!;
     ctx.bezierCurveTo(
       p1.x + (p2.x - p0.x) / 6,
       p1.y + (p2.y - p0.y) / 6,
@@ -36,13 +39,13 @@ function traceSmoothCurve(ctx: CanvasRenderingContext2D, pts: Vec[]): void {
 }
 
 export interface HoverZone {
-  /** unique across the whole figure — pairing text with colour is enough to
+  /** unique across the whole figure — pairing text with color is enough to
    * disambiguate two elements that happen to share a name (e.g. the same
-   * construction repeated for two different bodies in different colours) */
+   * construction repeated for two different bodies in different colors) */
   id: string;
   text: string;
   sub: string;
-  colour: string;
+  color: string;
   /** screen-space points; a single point degenerates the hit-test to a
    * circle. Ignored when `circle` is set. */
   pts: Vec[];
@@ -56,7 +59,7 @@ export interface HoverZone {
    * Catmull-Rom curve doesn't. Set only by a caller whose drawn shape is a
    * curve through more points than its hit-test needs; drawHighlight() draws
    * along this instead of `pts` when present. */
-  curvePts?: Vec[];
+  curvePts?: Vec[] | undefined;
 }
 
 export interface HoverTooltipEls {
@@ -82,12 +85,12 @@ export class HoverController {
    * the caller can brighten it while drawing without waiting a frame.
    *
    * `id` disambiguates zones that would otherwise collide: the default,
-   * `text|colour`, is enough when a figure never hovers two differently-
-   * shaped things that happen to share both a name and a colour (a ring and
+   * `text|color`, is enough when a figure never hovers two differently-
+   * shaped things that happen to share both a name and a color (a ring and
    * the body riding it, say) — pass an explicit `id` when it might. */
-  mark(pts: Vec[], text: string, sub: string, colour: string, id?: string, curvePts?: Vec[]): boolean {
-    const zoneId = id ?? `${text}|${colour}`;
-    this.zones.push({ id: zoneId, text, sub, colour, pts, curvePts });
+  mark(pts: Vec[], text: string, sub: string, color: string, id?: string, curvePts?: Vec[]): boolean {
+    const zoneId = id ?? `${text}|${color}`;
+    this.zones.push({ id: zoneId, text, sub, color, pts, curvePts });
     return this.hoverId === zoneId;
   }
 
@@ -95,9 +98,9 @@ export class HoverController {
    * hit-test and highlight, instead of approximating it with points in
    * `pts` the way mark() would need to — cheaper (no polygon to build or
    * walk) and, at high zoom, visibly more accurate against the drawn arc. */
-  markCircle(c: Vec, r: number, text: string, sub: string, colour: string, id?: string): boolean {
-    const zoneId = id ?? `${text}|${colour}`;
-    this.zones.push({ id: zoneId, text, sub, colour, pts: [c], circle: { c, r } });
+  markCircle(c: Vec, r: number, text: string, sub: string, color: string, id?: string): boolean {
+    const zoneId = id ?? `${text}|${color}`;
+    this.zones.push({ id: zoneId, text, sub, color, pts: [c], circle: { c, r } });
     return this.hoverId === zoneId;
   }
 
@@ -134,13 +137,13 @@ export class HoverController {
   /** Draw a glow round whatever matched this frame's update() — a ring for a
    * point, a bright retrace for a line or arc. Call last, in plain screen
    * space (after any ctx.restore() that undoes the world-space camera transform). */
-  drawHighlight(ctx: CanvasRenderingContext2D, glowColour: string): void {
+  drawHighlight(ctx: CanvasRenderingContext2D, glowColor: string): void {
     const hot = this.zones.find((z) => z.id === this.hoverId);
     if (!hot) return;
     ctx.save();
     ctx.globalAlpha = 0.95;
-    ctx.strokeStyle = glowColour;
-    ctx.shadowColor = hot.colour;
+    ctx.strokeStyle = glowColor;
+    ctx.shadowColor = hot.color;
     ctx.shadowBlur = 10;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -150,9 +153,10 @@ export class HoverController {
       ctx.arc(hot.circle.c.x, hot.circle.c.y, hot.circle.r, 0, FULL_CIRCLE);
       ctx.stroke();
     } else if (hot.pts.length === 1) {
+      // length === 1 guarantees index 0 exists.
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(hot.pts[0].x, hot.pts[0].y, 7, 0, 7);
+      ctx.arc(hot.pts[0]!.x, hot.pts[0]!.y, 7, 0, FULL_CIRCLE);
       ctx.stroke();
     } else if (hot.curvePts && hot.curvePts.length > 1) {
       // A trail is already drawn, faded, across a good stretch of the

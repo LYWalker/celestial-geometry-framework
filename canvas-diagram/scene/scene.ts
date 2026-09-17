@@ -19,15 +19,15 @@
  * units, and would scale wrongly under a zoomed-in transform.
  */
 
-import { FULL_CIRCLE, sub, polar, unit, type Vec } from '../geometry';
-import { applyCamera, worldToScreen, type Camera } from '../camera';
-import type { Face, Label, LabelTheme } from '../labels';
-import type { HoverController } from '../hover';
-import { Sphere } from './sphere';
-import { Angle } from './angle';
-import { Connector, drawCenterMark } from './connector';
-import { Anchor } from './anchor';
-import { Trail } from './trail';
+import { FULL_CIRCLE, sub, polar, unit, type Vec } from '../geometry.js';
+import { applyCamera, worldToScreen, type Camera } from '../camera.js';
+import type { Face, Label, LabelTheme } from '../labels.js';
+import type { HoverController } from '../hover.js';
+import { Sphere } from './sphere.js';
+import { Angle } from './angle.js';
+import { Connector, drawCenterMark } from './connector.js';
+import { Anchor } from './anchor.js';
+import { Trail } from './trail.js';
 import {
   type BodyRenderContext,
   type BodyRenderer,
@@ -37,7 +37,7 @@ import {
   resolveDirection,
   resolvePoint,
   resolveScalar,
-} from './types';
+} from './types.js';
 
 export type SceneItem = Sphere | Angle | Connector | Anchor | Trail;
 
@@ -82,7 +82,7 @@ const defaultBodyRenderer: BodyRenderer = (ctx, b) => {
   ctx.globalAlpha = 1;
 };
 
-/** Fallback colours and fonts for any object that doesn't set its own —
+/** Fallback colors and fonts for any object that doesn't set its own —
  * extends LabelTheme so the same object can be passed straight to drawLabels(). */
 export interface SceneTheme extends LabelTheme {
   ring: string;
@@ -103,19 +103,26 @@ export interface SceneDrawOptions {
   ref: PointLike;
   camera: Camera;
   theme: SceneTheme;
-  hover?: HoverController;
+  // The four fields below are widened to `| undefined` (not just an
+  // omittable key) under exactOptionalPropertyTypes: Stage.render() passes
+  // all of `opts.hover`/`lightSource`/`showLabels`/etc straight through from
+  // its own identically-optional fields, `undefined` included, rather than
+  // conditionally spreading each one away — this call happens once a frame
+  // and building a second object shape to omit possibly-absent keys would
+  // cost more than the widening does.
+  hover?: HoverController | undefined;
   /** where the light comes from, for any Sphere with a custom `render` that
    * wants a lit hemisphere — resolved once per draw call and handed to
    * every body renderer as a screen-space unit vector */
-  lightSource?: PointLike;
+  lightSource?: PointLike | undefined;
   /** name what can be named. Default true. */
-  showLabels?: boolean;
+  showLabels?: boolean | undefined;
   /** draw Angles and Connectors (and a Sphere's centre mark). Default true
    * — turn off for the plain picture without the working shown. */
-  showConstruction?: boolean;
+  showConstruction?: boolean | undefined;
   /** draw sphere rings themselves. Default true — turn off to show only the
    * bodies riding them. */
-  showRings?: boolean;
+  showRings?: boolean | undefined;
 }
 
 export class Scene {
@@ -284,11 +291,11 @@ export class Scene {
             const c = item.centerAt(f);
             const r = item.radiusAt(f);
             if (this.checkFinite(item.id, c)) break;
-            const colour = item.cfg.color ?? theme.ring;
+            const color = item.cfg.color ?? theme.ring;
 
             if (item.showRing && showRings) {
               ctx.globalAlpha = opacity * ambientAlpha;
-              ctx.strokeStyle = colour;
+              ctx.strokeStyle = color;
               ctx.beginPath();
               ctx.arc(c.x, c.y, r, 0, FULL_CIRCLE);
               ctx.stroke();
@@ -296,7 +303,7 @@ export class Scene {
               // and registered unconditionally now — the sun's own eccentric
               // circle is exactly the kind of line a figure most wants
               // hoverable, and its `:ring`/`:body` ids no longer collide.
-              hover?.markCircle(toScreen(c), r * camera.zoom, item.name, hoverSub(item.cfg), colour, `${item.id}:ring`);
+              hover?.markCircle(toScreen(c), r * camera.zoom, item.name, hoverSub(item.cfg), color, `${item.id}:ring`);
               ctx.globalAlpha = ambientAlpha;
             }
             if (showConstruction && resolveBool(item.cfg.markCenter, f)) {
@@ -319,10 +326,10 @@ export class Scene {
                   gap: item.cfg.labelGap ?? 6,
                   active: false,
                   rank: item.cfg.labelRank ?? 40,
-                  colour: item.cfg.color,
+                  color: item.cfg.color,
                   font: theme.font,
                   subFont: theme.subFont,
-                  alpha: opacity,
+                  alpha: opacity * ambientAlpha,
                   leader: false,
                 });
               }
@@ -331,11 +338,11 @@ export class Scene {
 
             const worldP = item.position(f);
             if (this.checkFinite(item.id, worldP)) break;
-            const bodyColour = item.cfg.color ?? theme.body;
+            const bodyColor = item.cfg.color ?? theme.body;
             const size = item.cfg.dotSize ?? 4;
             const screenP = toScreen(worldP);
             const hot =
-              hover?.mark([screenP], item.name, hoverSub(item.cfg), bodyColour, `${item.id}:body`) ?? false;
+              hover?.mark([screenP], item.name, hoverSub(item.cfg), bodyColor, `${item.id}:body`) ?? false;
 
             pendingBodies.push(() => {
               const light = lightScreen !== undefined ? unit(sub(lightScreen, screenP)) : undefined;
@@ -346,7 +353,7 @@ export class Scene {
                 r: size,
                 f,
                 camera,
-                color: bodyColour,
+                color: bodyColor,
                 hot,
                 alpha: opacity * ambientAlpha,
                 light,
@@ -364,10 +371,10 @@ export class Scene {
                 gap: item.cfg.labelGap ?? size + 6,
                 active: hot,
                 rank: item.cfg.labelRank ?? 50,
-                colour: item.cfg.color,
+                color: item.cfg.color,
                 font: hot ? theme.activeFont : theme.font,
                 subFont: theme.subFont,
-                alpha: opacity,
+                alpha: opacity * ambientAlpha,
                 leader: true,
               });
             }
@@ -377,14 +384,14 @@ export class Scene {
           case 'anchor': {
             const p = item.position(f);
             if (this.checkFinite(item.id, p)) break;
-            const colour = item.cfg.color ?? theme.centerMark;
+            const color = item.cfg.color ?? theme.centerMark;
             const marker = item.cfg.marker ?? 'cross';
             const screenP = toScreen(p);
 
             ctx.globalAlpha = opacity * ambientAlpha;
-            if (marker === 'cross') drawCenterMark(ctx, p, camera.zoom, colour, item.cfg.dotSize ?? 5);
+            if (marker === 'cross') drawCenterMark(ctx, p, camera.zoom, color, item.cfg.dotSize ?? 5);
             else if (marker === 'dot') {
-              ctx.fillStyle = colour;
+              ctx.fillStyle = color;
               ctx.beginPath();
               ctx.arc(p.x, p.y, (item.cfg.dotSize ?? 3) / camera.zoom, 0, FULL_CIRCLE);
               ctx.fill();
@@ -393,7 +400,7 @@ export class Scene {
 
             const hot =
               marker !== 'none'
-                ? (hover?.mark([screenP], item.name, hoverSub(item.cfg), colour, `${item.id}:anchor`) ?? false)
+                ? (hover?.mark([screenP], item.name, hoverSub(item.cfg), color, `${item.id}:anchor`) ?? false)
                 : false;
             if (showLabels && marker !== 'none' && (item.cfg.showLabel ?? true)) {
               labels.push({
@@ -405,10 +412,10 @@ export class Scene {
                 gap: item.cfg.labelGap ?? (item.cfg.dotSize ?? 5) + 6,
                 active: hot,
                 rank: item.cfg.labelRank ?? 30,
-                colour: item.cfg.color,
+                color: item.cfg.color,
                 font: theme.font,
                 subFont: theme.subFont,
-                alpha: opacity,
+                alpha: opacity * ambientAlpha,
                 leader: true,
               });
             }
@@ -419,12 +426,12 @@ export class Scene {
             if (!showConstruction) break;
             const mid = item.midAt(f);
             if (this.checkFinite(item.id, mid)) break;
-            const colour = item.cfg.color ?? theme.angle;
+            const color = item.cfg.color ?? theme.angle;
             ctx.globalAlpha = opacity * ambientAlpha;
-            item.draw(ctx, f, camera.zoom, colour);
+            item.draw(ctx, f, camera.zoom, color);
             ctx.globalAlpha = ambientAlpha;
             const hot =
-              hover?.mark(item.hoverPts(f, toScreen), item.name, hoverSub(item.cfg), colour, `${item.id}:angle`) ??
+              hover?.mark(item.hoverPts(f, toScreen), item.name, hoverSub(item.cfg), color, `${item.id}:angle`) ??
               false;
             if (showLabels && (item.cfg.showLabel ?? true)) {
               const midScreen = toScreen(mid);
@@ -439,10 +446,10 @@ export class Scene {
                 gap: item.cfg.labelGap ?? 6,
                 active: hot,
                 rank: item.cfg.labelRank ?? 60,
-                colour: item.cfg.color,
+                color: item.cfg.color,
                 font: theme.font,
                 subFont: theme.subFont,
-                alpha: opacity,
+                alpha: opacity * ambientAlpha,
                 leader: false,
               });
             }
@@ -454,16 +461,16 @@ export class Scene {
             const a = item.fromAt(f);
             const b = item.toAt(f);
             if (this.checkFinite(item.id, a, b)) break;
-            const colour = item.cfg.color ?? theme.connector;
+            const color = item.cfg.color ?? theme.connector;
             ctx.globalAlpha = opacity * ambientAlpha;
-            item.draw(ctx, f, camera.zoom, colour);
+            item.draw(ctx, f, camera.zoom, color);
             ctx.globalAlpha = ambientAlpha;
             const hot =
               hover?.mark(
                 [toScreen(a), toScreen(b)],
                 item.name,
                 hoverSub(item.cfg),
-                colour,
+                color,
                 `${item.id}:connector`,
               ) ?? false;
             if (showLabels && (item.cfg.showLabel ?? false)) {
@@ -477,10 +484,10 @@ export class Scene {
                 gap: item.cfg.labelGap ?? 6,
                 active: hot,
                 rank: item.cfg.labelRank ?? 45,
-                colour: item.cfg.color,
+                color: item.cfg.color,
                 font: theme.font,
                 subFont: theme.subFont,
-                alpha: opacity,
+                alpha: opacity * ambientAlpha,
                 leader: false,
               });
             }
@@ -488,14 +495,14 @@ export class Scene {
           }
 
           case 'trail': {
-            const colour = item.cfg.color ?? theme.trail;
+            const color = item.cfg.color ?? theme.trail;
             // Undo the ambient `-ref` this pass otherwise applies to every
             // item — the trail's own points already carry that subtraction,
             // done per-sample against each sample's own past moment (see
             // toScreenRel above and trail.ts's pushSample).
             ctx.save();
             ctx.translate(ref.x, ref.y);
-            item.draw(ctx, f, camera.zoom, opacity * ambientAlpha, colour);
+            item.draw(ctx, f, camera.zoom, opacity * ambientAlpha, color);
             ctx.restore();
             if (hover) {
               const pts = item.points(f);
@@ -505,14 +512,17 @@ export class Scene {
                 // find "the pointer is near this line" within threshold.
                 const stride = Math.max(1, Math.floor(pts.length / 24));
                 const sampled: Vec[] = [];
-                for (let i = 0; i < pts.length; i += stride) sampled.push(toScreenRel(pts[i]));
-                sampled.push(toScreenRel(pts[pts.length - 1]));
+                // Both indexes below are in range by construction: the loop
+                // bound is pts.length itself, and pts.length > 1 was just
+                // checked above — the `!`s only satisfy noUncheckedIndexedAccess.
+                for (let i = 0; i < pts.length; i += stride) sampled.push(toScreenRel(pts[i]!));
+                sampled.push(toScreenRel(pts[pts.length - 1]!));
                 // Full resolution, for drawHighlight() to trace the same
                 // smooth curve the trail is actually drawn with — `sampled`
                 // above is deliberately coarser, plenty for hit-testing but
                 // visibly straight-edged if used for the highlight itself.
                 const curvePts = pts.map(toScreenRel);
-                hover.mark(sampled, item.name, hoverSub(item.cfg), colour, `${item.id}:trail`, curvePts);
+                hover.mark(sampled, item.name, hoverSub(item.cfg), color, `${item.id}:trail`, curvePts);
               }
             }
             break;
