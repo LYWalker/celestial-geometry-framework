@@ -9,13 +9,24 @@
   },
   "exports": {
     ".": "./canvas-diagram/index.ts",
-    "./scene": "./canvas-diagram/scene/index.ts"
+    "./scene": "./canvas-diagram/scene/index.ts",
+    "./three": "./canvas-diagram/three/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
     "test": "tsc -p tsconfig.test.json && node --test \".test-out/test/*.test.js\""
   },
+  "peerDependencies": {
+    "three": ">=0.160.0"
+  },
+  "peerDependenciesMeta": {
+    "three": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@types/three": "^0.186.0",
+    "three": "^0.186.0",
     "typescript": "^5.7"
   }
 }
