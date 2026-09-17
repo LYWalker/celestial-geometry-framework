@@ -173,6 +173,35 @@ describe('ZodiacRing as the thing a figure draws lines to', () => {
     assert.ok(near(ring.inner(frame(2)), 110));
   });
 
+  test('a growing ring stays put when the dial line is resolved first (regression)', () => {
+    // The order that broke it: something asks the *dial* about a frame
+    // before the ring has measured that frame — a hit-test, a readout, or
+    // simply Scene.draw reaching the connector first. Resolving the dial
+    // resolves `ring.outer`, which measures the scene, which reads the dial
+    // back mid-resolution. When that read returned the previous frame's
+    // endpoint, the ring measured a line as long as the last ring, cleared
+    // it by `padding`, and did it again every frame — with `fit: 'grow'`
+    // ratcheting the result up forever.
+    const ring = new ZodiacRing({ padding: 10, band: 10, fit: 'grow', segments: SEGMENTS });
+    const earth = new Anchor({ id: 'earth', name: 'Earth', marker: 'none' });
+    const shell = new Sphere({ id: 'shell', name: 'Shell', center: earth, radius: 100, showBody: false });
+    const dial = new Connector({ id: 'dial', name: 'Dial', from: earth, toward: 0, length: ring.outer });
+    const scene = new Scene().add(earth).add(shell).add(dial);
+    ring.fitTo(scene);
+
+    const radii: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const f = frame(i);
+      dial.toAt(f); // the dial first, the ring second
+      radii.push(ring.inner(f));
+    }
+    assert.deepEqual(
+      radii.map((r) => Math.round(r)),
+      [110, 110, 110, 110, 110, 110],
+      `ring ran away: ${radii.map((r) => r.toFixed(1)).join(' -> ')}`,
+    );
+  });
+
   test('warm() opens a growing ring at its final size before the first draw', () => {
     const ring = new ZodiacRing({ padding: 10, band: 10, fit: 'grow', segments: SEGMENTS });
     const earth = new Anchor({ id: 'earth', name: 'Earth', marker: 'none' });
@@ -188,6 +217,36 @@ describe('ZodiacRing as the thing a figure draws lines to', () => {
     ring.warm([frame(0), frame(0.5), frame(1)]);
     // t = 0 would measure 110 on its own; the warmed mark holds it at 130
     assert.ok(near(ring.inner(frame(0)), 130));
+  });
+
+  test('freeze() keeps the size and lets the centre keep moving', () => {
+    const earth = new Anchor({ id: 'earth', name: 'Earth', marker: 'none' });
+    const planet = new Sphere({
+      id: 'planet',
+      name: 'Planet',
+      center: earth,
+      radius: (f) => 100 + 20 * f.t,
+      showBody: false,
+    });
+    const scene = new Scene().add(earth).add(planet);
+    const ring = new ZodiacRing({
+      padding: 10,
+      band: 10,
+      fit: 'grow',
+      segments: SEGMENTS,
+      center: (f) => ({ x: 50 * f.t, y: 0 }),
+    });
+    ring.fitTo(scene);
+
+    ring.warm([frame(0), frame(0.5), frame(1)]).freeze();
+    // the largest view it was shown — at t = 1 the centre has moved 50 out
+    // from the planet's own centre, so the far side of its ring is 170 away
+    // — and it stays there, however small the picture gets afterwards
+    assert.ok(near(ring.inner(frame(0)), 180));
+    assert.ok(near(ring.inner(frame(1)), 180));
+    assert.ok(near(ring.inner(frame(9)), 180));
+    // but the centre still tracks the frame
+    assert.ok(near(ring.geometry(frame(2))!.center.x, 100));
   });
 
   test('a Stage draws the very ring the figure holds', () => {

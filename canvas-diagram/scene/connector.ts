@@ -80,23 +80,40 @@ export class Connector extends SceneObject<ConnectorConfig> {
     return { x: this.memoTo!.x, y: this.memoTo!.y };
   }
 
+  /**
+   * The memo is *published last*, once both endpoints are computed — never
+   * before. Claiming this frame up front and filling the values in
+   * afterwards looks equivalent and isn't: anything reached while resolving
+   * (a `length` Scalar that asks something else about this same frame — an
+   * auto-sized ZodiacRing being the real case) can read this connector back
+   * mid-flight, and would then be handed the *previous* frame's endpoints
+   * as though they were this frame's. That stale read is invisible in the
+   * drawing and vicious in a measurement: the ring measured a line whose
+   * length was the last ring, grew to clear it, and grew again every frame
+   * after. A re-entrant read now simply recomputes, which terminates
+   * because whatever it re-enters is itself mid-flight and answers with its
+   * own base case.
+   */
   private resolve(f: Frame): void {
     if (this.memoFrame === f) return;
-    this.memoFrame = f;
     const a = resolvePoint(this.cfg.from, f);
     const raw = this.rawToAt(a, f);
-    this.memoFrom = { x: a.x, y: a.y };
+    const from = { x: a.x, y: a.y };
 
     const shorten = this.cfg.shorten;
+    let to: Vec;
     if (!shorten) {
-      this.memoTo = { x: raw.x, y: raw.y };
-      return;
+      to = { x: raw.x, y: raw.y };
+    } else {
+      const dx = raw.x - a.x;
+      const dy = raw.y - a.y;
+      const len = Math.hypot(dx, dy);
+      const k = Math.max(0, len - shorten) / (len || 1);
+      to = { x: a.x + dx * k, y: a.y + dy * k };
     }
-    const dx = raw.x - a.x;
-    const dy = raw.y - a.y;
-    const len = Math.hypot(dx, dy);
-    const k = Math.max(0, len - shorten) / (len || 1);
-    this.memoTo = { x: a.x + dx * k, y: a.y + dy * k };
+    this.memoFrom = from;
+    this.memoTo = to;
+    this.memoFrame = f;
   }
 
   /** The line's other end before `shorten` is applied. */

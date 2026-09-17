@@ -62,6 +62,13 @@ export interface ZodiacConfig {
    *   figure that doesn't want even that one settling-in can warm the mark
    *   before its first draw with `warm()`.
    *
+   * `'grow'` keeps whatever it is given, so it is only as good as the
+   * moments it sees: a figure whose Frame carries several amounts must be
+   * sure any it warms with are *combinations it can actually show*. An
+   * orrery warmed with "the shells half-faded-in" and "the camera still on
+   * the sun" — two things that never happen at once, though each happens —
+   * measured a reach no view of it ever has, and wore that ring for good.
+   *
    * Ignored when `radius` is a number.
    */
   fit?: 'frame' | 'grow';
@@ -108,6 +115,9 @@ export class ZodiacRing {
   /** true while measuring the scene — see this file's own header: it's what
    * keeps a line drawn out to the ring from pushing the ring outward */
   private measuring = false;
+  /** set by freeze(): the radius the ring keeps, whatever the scene does
+   * next. Its *centre* still moves — see freeze() */
+  private frozenRadius: number | null = null;
 
   constructor(public cfg: ZodiacConfig) {}
 
@@ -116,6 +126,8 @@ export class ZodiacRing {
    * (`ring.outer(f)`, for a `fitRadius`) before the first draw. */
   fitTo(scene: Scene): this {
     this.scene = scene;
+    this.frozenRadius = null;
+    this.memoFrame = null;
     return this;
   }
 
@@ -129,6 +141,26 @@ export class ZodiacRing {
     return this;
   }
 
+  /**
+   * Stop measuring, and keep the size it has now — for a figure whose ring
+   * should be a fixed backdrop rather than something that follows the
+   * picture around. Its *centre* still resolves every frame, so a ring that
+   * belongs to "whoever is watching" still travels with them; only the
+   * radius is fixed.
+   *
+   * The useful shape is `warm(...).freeze()` with `fit: 'grow'`: measure
+   * every view the figure can show, keep the largest, and stop. That's a
+   * ring big enough for all of them and motionless in each — where a
+   * per-frame ring, honest as it is, breathes as the picture inside it
+   * grows and shrinks, which reads as the sky moving.
+   *
+   * `fitTo()` and `set()` lift it; there's no separate unfreeze.
+   */
+  freeze(): this {
+    this.frozenRadius = this.memo?.radius ?? (this.highWater || null);
+    return this;
+  }
+
   /** Retheme or resize at runtime — a light/dark toggle, a different set of
    * segments — discarding the measurement so the next frame re-derives it. */
   set(cfg: ZodiacConfig): void {
@@ -136,6 +168,7 @@ export class ZodiacRing {
     this.memoFrame = null;
     this.memo = null;
     this.highWater = 0;
+    this.frozenRadius = null;
   }
 
   /**
@@ -151,7 +184,10 @@ export class ZodiacRing {
 
     const center = resolvePoint(z.center ?? ORIGIN, f);
     let radius: number;
-    if (typeof z.radius === 'number') {
+    if (this.frozenRadius !== null) {
+      // frozen: the size stays, the centre still moves with the figure
+      radius = this.frozenRadius;
+    } else if (typeof z.radius === 'number') {
       radius = z.radius;
     } else {
       // No Scene yet (a resize before the first draw): keep the last known
@@ -198,6 +234,11 @@ export class ZodiacRing {
    * ring open at its final size instead of creeping outward as the figure
    * plays. Nothing is drawn; this is only the arithmetic a later frame would
    * have done anyway.
+   *
+   * Every Frame passed here must be one the figure can really be in — see
+   * `fit`. Sweeping each amount independently is the easy way to invent a
+   * moment that can't happen and size the ring to it forever; sweep along
+   * the *paths* the figure takes between its views instead.
    */
   warm(frames: Iterable<Frame>): this {
     for (const f of frames) this.geometry(f);

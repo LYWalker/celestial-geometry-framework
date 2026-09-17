@@ -155,10 +155,13 @@ case-by-case plumbing:
   before the scene and its `inner`/`outer` are ordinary Scalars, so a dial
   line reaches exactly to it — `length: ring.outer` — and so does
   `resize({ fitRadius: ring.outer(f) + 8 })`. A line drawn to the ring
-  doesn't push the ring out. Pass `radius` to place it by hand instead, or
-  `fit: 'grow'` for a scene whose outermost object swings (an eccentric
-  orbit), which settles the ring at the furthest reach rather than letting
-  it breathe; `warm()` settles it before the first frame.
+  doesn't push the ring out. Pass `radius` to place it by hand instead.
+  For a ring that should be a fixed backdrop rather than something that
+  follows the picture around, `warm(views).freeze()` with `fit: 'grow'`
+  measures every view the figure can show, keeps the largest and stops —
+  the centre still travels, only the size is fixed. Warm it with moments
+  the figure can really be in: sweeping a Frame's amounts independently
+  invents views it never shows, and freezes the ring to one of those.
 - **`wireCamera`** wires a canvas's wheel/pointer events to the pan/zoom
   math in `camera.ts`: wheel and pinch zoom on the point under the
   cursor/fingers, one-finger drag pans, a drag that never really moved

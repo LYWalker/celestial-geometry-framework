@@ -101,13 +101,16 @@ export class Angle extends SceneObject<AngleConfig> {
    * re-resolving the two directions for itself. */
   private sweepOf(f: Frame): Sweep {
     if (this.memoFrame !== f) {
-      this.memoFrame = f;
       const c = this.vertexAt(f);
       const r = this.radiusAt(f);
       const from = this.fromAt(f);
       const to = this.toAt(f);
       const cw = (this.cfg.short ?? true) ? norm360(to - from) > 180 : (this.cfg.clockwise ?? false);
+      // Published last, once it's actually computed — see Connector.resolve's
+      // own note: claiming the frame first hands anything that reads this
+      // angle back mid-resolution the *previous* frame's sweep.
       this.memoSweep = { c, r, from, to, cw };
+      this.memoFrame = f;
     }
     return this.memoSweep!;
   }
