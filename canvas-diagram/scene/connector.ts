@@ -6,14 +6,17 @@
  * and where they are at a given moment is never something they compute by hand.
  */
 
-import { polar, type Vec } from '../geometry.js';
+import { FULL_CIRCLE, polar, unit, type Vec } from '../geometry.js';
+import { arrowHead } from '../annotate.js';
 import {
+  type BoolLike,
   type DirectionLike,
   type Frame,
   type Meta,
   type PointLike,
   type Scalar,
   SceneObject,
+  resolveBool,
   resolveDirection,
   resolvePoint,
   resolveScalar,
@@ -36,8 +39,21 @@ export interface ConnectorConfig extends Meta {
   /** stop short of `to` rather than reaching it — useful when `to` is a body
    * drawn with its own radius, so the line doesn't run under the dot */
   shorten?: number;
+  /** put an arrowhead on the `to` end — for a line that asserts a
+   * *direction* ("the far point is that way") rather than joining two things
+   * that are both already drawn. Sized on screen, like an Angle's. */
+  arrow?: BoolLike;
+  /** where along the line to hang its name, 0 (`from`) to 1 (`to`). Default
+   * 0.5. A sightline drawn out to a point the construction names — an
+   * apogee, a far point — wants its name at the end it is asserting, not
+   * halfway down a line that is only there to get there. */
+  labelAt?: number;
   lineWidth?: number;
 }
+
+/** A Connector arrowhead's size, screen px — the same as an Angle's, so a
+ * "which way" mark means the same thing wherever it appears in a figure. */
+const ARROW_SIZE_PX = 5.5;
 
 export class Connector extends SceneObject<ConnectorConfig> {
   readonly kind = 'connector' as const;
@@ -138,19 +154,40 @@ export class Connector extends SceneObject<ConnectorConfig> {
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
     ctx.stroke();
+    if (resolveBool(this.cfg.arrow, f)) {
+      const d = { x: b.x - a.x, y: b.y - a.y };
+      if (Math.hypot(d.x, d.y) > 1e-9) {
+        // solid even on a dashed line: the dashes say "a direction, not a
+        // path", the head says which way along it — two different claims,
+        // and a dashed arrowhead reads as neither
+        ctx.setLineDash([]);
+        arrowHead(ctx, b, unit(d), ARROW_SIZE_PX / zoom);
+      }
+    }
     ctx.restore();
+  }
+
+  /** Where to hang this connector's name — `labelAt` of the way along it. */
+  labelPointAt(f: Frame): Vec {
+    const a = this.fromAt(f);
+    const b = this.toAt(f);
+    const k = this.cfg.labelAt ?? 0.5;
+    return { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k };
   }
 }
 
 /** A small cross marking a point — the Rambam's own convention for a
- * circle's centre when it is not the earth. World-space; call inside the
- * caller's applyCamera block. */
+ * circle's centre when it is not the earth. `ring` adds a small circle
+ * through the arms, which is how a centre the construction keeps referring
+ * back to is drawn, as against a bare crossing of two lines. World-space;
+ * call inside the caller's applyCamera block. */
 export function drawCenterMark(
   ctx: CanvasRenderingContext2D,
   p: Vec,
   zoom: number,
   color: string,
   size = 5,
+  ring = false,
 ): void {
   const s = size / zoom;
   ctx.save();
@@ -162,5 +199,10 @@ export function drawCenterMark(
   ctx.moveTo(p.x, p.y - s);
   ctx.lineTo(p.x, p.y + s);
   ctx.stroke();
+  if (ring) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, s * 0.5, 0, FULL_CIRCLE);
+    ctx.stroke();
+  }
   ctx.restore();
 }

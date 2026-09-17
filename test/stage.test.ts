@@ -249,6 +249,29 @@ describe('ZodiacRing as the thing a figure draws lines to', () => {
     assert.ok(near(ring.geometry(frame(2))!.center.x, 100));
   });
 
+  test('a frozen ring stays frozen however often Stage re-points it at the same scene', () => {
+    // Stage.render() calls fitTo() with its Scene on every single frame. A
+    // frozen, growing ring that thawed on each of those would creep outward
+    // to the largest reach any transitional frame ever had and keep it — the
+    // freeze would be undone by the very next draw.
+    const scene = sceneReaching(100);
+    const ring = new ZodiacRing({ padding: 0, band: 10, fit: 'grow', segments: SEGMENTS });
+    const stage = makeStage(ring);
+    ring.fitTo(scene);
+    ring.warm([frame(0)]).freeze();
+    assert.ok(near(ring.inner(frame(0)), 100));
+
+    // the scene now reaches much further — as it does mid-transition, when
+    // the ring's own centre has moved off the geometry it measures
+    scene.add(new Sphere({ id: 'far', name: 'Far', radius: 400, showBody: false }));
+    for (let i = 1; i < 5; i++) stage.zodiacGeometry(frame(i), scene);
+    assert.ok(near(ring.inner(frame(9)), 100));
+
+    // but a genuinely different Scene is a real change, and lifts it
+    ring.fitTo(sceneReaching(250));
+    assert.ok(near(ring.inner(frame(10)), 250));
+  });
+
   test('a Stage draws the very ring the figure holds', () => {
     const ring = new ZodiacRing({ padding: 10, band: 10, segments: SEGMENTS });
     const stage = makeStage(ring);

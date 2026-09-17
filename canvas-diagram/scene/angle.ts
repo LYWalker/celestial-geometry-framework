@@ -55,6 +55,11 @@ export interface AngleConfig extends Meta {
   clockwise?: boolean;
   /** show the numeric value (valueAt(), degrees) as the label's sub-line */
   showValue?: boolean;
+  /** how to write that value. Default `"12.3°"`. Override for a quantity
+   * whose own convention is something else — a correction the Rambam states
+   * in arc-minutes is written `+12′`, and rounding it to a tenth of a degree
+   * would throw away most of what it says. */
+  format?: (degrees: number) => string;
   lineWidth?: number;
 }
 
@@ -153,6 +158,12 @@ export class Angle extends SceneObject<AngleConfig> {
       pts.push(toScreen({ x: c.x + p.x, y: c.y + p.y }));
     }
     return pts;
+  }
+
+  /** This angle's value, written the way the figure writes it. */
+  valueTextAt(f: Frame): string {
+    const v = this.valueAt(f);
+    return this.cfg.format ? this.cfg.format(v) : `${v.toFixed(1)}°`;
   }
 
   /** Where to hang this angle's name — the middle of its sweep, in world space. */

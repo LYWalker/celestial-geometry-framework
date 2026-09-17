@@ -76,7 +76,16 @@ export interface ZodiacConfig {
   band?: number;
   segments: ZodiacSegment[];
   font?: Face;
+  /** the ring's own lines: its two edges and the dial marks between them.
+   * Faint by nature — it is a backdrop, and the figure is what is being
+   * read against it. */
   color?: string;
+  /** the segment names. Separate from `color`, and by default much less
+   * faint, because they are not backdrop: a ring line at a tenth of full
+   * strength still reads as a ring, while a *word* at a tenth of full
+   * strength is simply unreadable. Defaults to `color` for a ring that
+   * genuinely wants both the same. */
+  labelColor?: string;
   /** the world point the ring is centred on. Default the origin — a zodiac
    * is a fixed backdrop, not tied to whatever the camera's `ref` happens to
    * be (which is why this is its own field rather than reusing `ref`). */
@@ -125,6 +134,16 @@ export class ZodiacRing {
    * Scene it renders; call it yourself for a ring you want to ask about
    * (`ring.outer(f)`, for a `fitRadius`) before the first draw. */
   fitTo(scene: Scene): this {
+    // Pointing at the *same* Scene again is not a change, and must not be
+    // treated as one. Stage.render() calls this every single frame with the
+    // Scene it is drawing, so a fitTo() that always lifted freeze() meant a
+    // frozen ring silently thawed on the first render after it was frozen —
+    // and a `fit: 'grow'` ring then spent the rest of the session creeping
+    // out to the largest reach any *transitional* frame ever had, which is
+    // exactly the moment its own centre is somewhere else and everything
+    // measures further away than it ever really is. That is the trap `fit`
+    // warns about, arrived at without the figure doing anything wrong.
+    if (this.scene === scene) return this;
     this.scene = scene;
     this.frozenRadius = null;
     this.memoFrame = null;

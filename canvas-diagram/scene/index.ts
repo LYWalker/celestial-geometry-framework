@@ -41,6 +41,7 @@ export * from './anchor.js';
 export * from './sphere.js';
 export * from './angle.js';
 export * from './connector.js';
+export * from './marker.js';
 export * from './trail.js';
 export * from './scene.js';
 export * from './zodiac.js';

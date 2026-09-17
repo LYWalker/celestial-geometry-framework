@@ -11,9 +11,11 @@ import { type Frame, type Meta, type PointLike, type Positioned, ORIGIN, SceneOb
 export interface AnchorConfig extends Meta {
   /** where it sits — fixed, or itself riding another object. Default: the origin. */
   at?: PointLike;
-  /** how to mark it on screen; 'none' for a point that exists only for other
-   * objects to reference and should never itself be drawn */
-  marker?: 'cross' | 'dot' | 'none';
+  /** how to mark it on screen. 'crosshair' is a cross with a small circle
+   * through its arms, for a centre the construction keeps referring back to,
+   * as against a bare crossing of two lines. 'none' is for a point that
+   * exists only for other objects to reference and is never itself drawn. */
+  marker?: 'cross' | 'crosshair' | 'dot' | 'none';
   /** px radius of the drawn marker */
   dotSize?: number;
 }

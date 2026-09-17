@@ -440,7 +440,7 @@ export class Stage {
       const Rl = (R + R2) / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = color;
+      ctx.fillStyle = z.labelColor ?? color;
       ctx.font = (z.font ?? { css: '600 9.5px system-ui, sans-serif', px: 9.5 }).css;
       for (let i = 0; i < n; i++) {
         const a = ((i + 0.5) * 360) / n;
@@ -527,6 +527,8 @@ export class Stage {
       showLabels: opts.showLabels,
       showConstruction: opts.showConstruction,
       showRings: opts.showRings,
+      // what a reading whose own point has left the frame pins its name to
+      bounds: { width: this.w, safeBottom: this.safeBottom || this.h },
     });
     opts.hover?.update(opts.pointer);
     opts.afterScene?.(labels);

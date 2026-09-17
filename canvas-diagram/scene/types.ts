@@ -24,8 +24,9 @@
  * Sphere) instead of re-walking a chain of parents on every read.
  */
 
-import { type Vec, dot, lonOf, sub } from '../geometry.js';
+import { type Vec, dot, lonOf, sub, unit } from '../geometry.js';
 import type { Camera } from '../camera.js';
+import type { Face } from '../labels.js';
 
 export interface Frame {
   /** the diagram's clock — whatever unit its speeds are stated in */
@@ -127,6 +128,28 @@ export function resolveDirection(d: DirectionLike, from: Vec, f: Frame): number 
   return lonOf(sub(d.position(f), from));
 }
 
+/** Resolve a `Meta.gloss`-shaped field — a fixed line, or one that states a
+ * live figure ("the true sun · Leo 14° 02'"). */
+export function resolveText(
+  g: string | ((f: Frame) => string) | undefined,
+  f: Frame,
+): string | undefined {
+  return typeof g === 'function' ? g(f) : g;
+}
+
+/** Resolve a `Meta.labelDir`-shaped field — a fixed direction or one that
+ * follows the frame — falling back to `fallback` when it isn't set. Always
+ * returns a unit vector, so an author can hand over any convenient vector
+ * (a raw `p - c`) without normalising it themselves. */
+export function resolveLabelDir(
+  d: Vec | ((f: Frame) => Vec) | undefined,
+  f: Frame,
+  fallback: Vec,
+): Vec {
+  const v = d === undefined ? fallback : typeof d === 'function' ? d(f) : d;
+  return Math.hypot(v.x, v.y) > 1e-9 ? unit(v) : fallback;
+}
+
 /** The distance between two points (fixed, computed, or another object's
  * position) at this moment — the thing every reading like "0.98 × R" in a
  * readout panel is built from, without an author reaching for Math.hypot. */
@@ -160,6 +183,42 @@ export function rayCircleFar(origin: Vec, bearing: number, centre: Vec, radius: 
   const disc = Math.max(0, radius * radius - perp2);
   const rho = proj + Math.sqrt(disc);
   return { x: origin.x + u.x * rho, y: origin.y + u.y * rho };
+}
+
+/**
+ * The point where a ray leaving `origin` on bearing `toward` actually meets
+ * the circle `(center, radius)`, as an ordinary Positioned other objects can
+ * be centred on, drawn to, or hung off.
+ *
+ * This is the difference between a dial that agrees with itself and one that
+ * doesn't. A *true* place is sighted from the centre of the ring, so "the
+ * point at that longitude" and "where the ray lands" are the same spot. A
+ * *mean* place is sighted from somewhere else — the sun's own circle's
+ * centre, the moon's large circle's centre — and on a ring of finite radius
+ * those two spots are not the same. Drawing the pointer one way and its tick
+ * and its name the other leaves all three visibly disagreeing near the ring,
+ * which is exactly where the figure is making its point. Resolve the
+ * intersection once, here, and let the line, the tick and the label all be
+ * placed from it.
+ */
+export function rayToCircle(
+  origin: PointLike,
+  toward: DirectionLike,
+  center: PointLike,
+  radius: Scalar,
+): Positioned {
+  return {
+    position(f: Frame): Vec {
+      const o = resolvePoint(origin, f);
+      const c = resolvePoint(center, f);
+      const r = resolveScalar(radius, f);
+      // A zero radius is what an auto-sized ring reports while it is busy
+      // measuring the scene (see ZodiacRing) — collapse onto the origin
+      // rather than hand back a point on a circle that has no size yet.
+      if (!(r > 0)) return { x: o.x, y: o.y };
+      return rayCircleFar(o, resolveDirection(toward, o, f), c, r);
+    },
+  };
 }
 
 /** A point that eases from `a` to `b` as `k` goes 0→1 — Orrery's `place()`
@@ -223,6 +282,39 @@ export interface Meta {
   /** overall opacity, 0–1, possibly a function of the frame — the mechanism
    * every mode crossfade in this kit's figures is built from */
   opacity?: Scalar;
+  /**
+   * The English gloss shown *beneath* this object's headline — "the sun's
+   * apogee (12:2)", "not the earth (11:13)". A separate channel from both
+   * `nameHe` (which is a name, and under `hebrewFirst` becomes the
+   * headline) and `description` (which is the hover tooltip's second line,
+   * and can be a couple of sentences). A gloss is the one short line that
+   * has to fit on the figure itself.
+   */
+  gloss?: string | ((f: Frame) => string);
+  /**
+   * Label this object the way this kit's Rambam figures label a
+   * *construction*, rather than a body: the Hebrew name as the headline —
+   * because in these figures the Hebrew names carry the argument — with
+   * `gloss` beneath it. An object with no `nameHe` is one the text implies
+   * but never names, so its English name becomes the headline instead, set
+   * in `SceneTheme.inferredFont` rather than the Hebrew face, so a name he
+   * gives and a name he doesn't never read as the same kind of thing.
+   *
+   * Off by default: a body ("The sun", with 'חמה' beneath) reads the other
+   * way round, and that is the ordinary case.
+   */
+  hebrewFirst?: boolean;
+  /** which way from its own point this object's label would rather sit.
+   * Each kind has a sensible default (outward from a sphere's centre,
+   * outward from an angle's vertex); set this for the exceptions — a name
+   * that belongs beside a line rather than beyond it. */
+  labelDir?: Vec | ((f: Frame) => Vec);
+  /** set this object's label in a face of its own, rather than the one the
+   * SceneTheme picks for its kind — for the one or two things in a figure
+   * that are a different size of statement from everything around them. */
+  labelFont?: Face;
+  /** likewise for its second line. */
+  labelSubFont?: Face;
   /** who keeps their name when there isn't room for everyone; lower ranks
    * are tried first, matching drawLabels()'s own convention */
   labelRank?: number;

@@ -28,19 +28,23 @@ import { Angle } from './angle.js';
 import { Connector, drawCenterMark } from './connector.js';
 import { Anchor } from './anchor.js';
 import { Trail } from './trail.js';
+import { RingMarker } from './marker.js';
 import {
   type BodyRenderContext,
   type BodyRenderer,
   type Frame,
+  type Meta,
   type PointLike,
   ORIGIN,
   resolveBool,
   resolveDirection,
+  resolveLabelDir,
   resolvePoint,
   resolveScalar,
+  resolveText,
 } from './types.js';
 
-export type SceneItem = Sphere | Angle | Connector | Anchor | Trail;
+export type SceneItem = Sphere | Angle | Connector | Anchor | Trail | RingMarker;
 
 function assertNever(x: never): never {
   throw new Error(`canvas-diagram scene: unhandled item kind "${(x as SceneItem).kind}"`);
@@ -53,6 +57,8 @@ export const LAYER = {
   anchor: 8,
   connector: 10,
   angle: 20,
+  /** a reading on the ring sits above the lines that reach it */
+  marker: 25,
   body: 30,
 } as const;
 
@@ -69,6 +75,8 @@ function layerOf(item: SceneItem): number {
       return LAYER.connector;
     case 'angle':
       return LAYER.angle;
+    case 'ringmarker':
+      return LAYER.marker;
     default:
       return assertNever(item);
   }
@@ -93,6 +101,44 @@ export interface SceneTheme extends LabelTheme {
   connector: string;
   trail: string;
   activeFont: Face;
+  /** the face a Hebrew headline is set in, for an object with
+   * `hebrewFirst` (see Meta). Falls back to `subFont`, which is already the
+   * figure's Hebrew face. */
+  nameFont?: Face;
+  /** the face an English headline is set in when `hebrewFirst` is asked for
+   * but the object has no Hebrew name — a point the text implies but never
+   * names. Deliberately a different face from `nameFont`, so a name he
+   * gives and a name he doesn't never read as the same kind of thing.
+   * Falls back to `font`. */
+  inferredFont?: Face;
+}
+
+/** What a label says and what it's set in, for one object — the single
+ * place the `hebrewFirst`/`gloss`/`nameHe` rules live, rather than four
+ * copies of them across the `switch` in draw(). */
+function labelStyle(m: Meta, theme: SceneTheme, active: boolean, f: Frame) {
+  const gloss = resolveText(m.gloss, f);
+  if (m.hebrewFirst) {
+    // A construction: the Hebrew name is the headline, because in these
+    // figures the names carry the argument, and the gloss explains it
+    // beneath. A point with no Hebrew name is one he never named — English
+    // headline, in its own face, so the two never blur.
+    return {
+      text: m.nameHe ?? m.name,
+      sub: gloss,
+      font:
+        m.labelFont ??
+        (m.nameHe ? (theme.nameFont ?? theme.subFont) : (theme.inferredFont ?? theme.font)),
+      subFont: m.labelSubFont ?? theme.noteFont,
+    };
+  }
+  // A body: English headline, Hebrew beneath — the ordinary case.
+  return {
+    text: m.name,
+    sub: gloss ?? m.nameHe,
+    font: m.labelFont ?? (active ? theme.activeFont : theme.font),
+    subFont: m.labelSubFont ?? theme.subFont,
+  };
 }
 
 export interface SceneDrawOptions {
@@ -124,6 +170,11 @@ export interface SceneDrawOptions {
   /** draw sphere rings themselves. Default true — turn off to show only the
    * bodies riding them. */
   showRings?: boolean | undefined;
+  /** the visible frame, screen px — what a RingMarker whose own point has
+   * gone off screen pins its name to instead of dropping it. Omit for a
+   * figure that would rather such a name simply be laid out at its own
+   * (off-screen, and so discarded) point. Stage.render() passes its own. */
+  bounds?: { width: number; safeBottom: number } | undefined;
 }
 
 export class Scene {
@@ -262,6 +313,12 @@ export class Scene {
           // world space `center` lives in before measuring.
           for (const p of item.points(f)) reach({ x: p.x + ref.x, y: p.y + ref.y });
           break;
+        case 'ringmarker':
+          // Never measured, whatever it says about `excludeFromExtent`: a
+          // reading sits *on* the ring, and an auto-sized ring is sized from
+          // this very measurement. Counting it would put the ring outside
+          // itself, and again the frame after that.
+          break;
         default:
           assertNever(item);
       }
@@ -315,6 +372,9 @@ export class Scene {
           p = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
           break;
         }
+        case 'ringmarker':
+          p = item.position(opts.f);
+          break;
         case 'trail':
           break;
         default:
@@ -336,6 +396,7 @@ export class Scene {
     const showLabels = opts.showLabels ?? true;
     const showConstruction = opts.showConstruction ?? true;
     const showRings = opts.showRings ?? true;
+    const bounds = opts.bounds;
     const ref = resolvePoint(opts.ref, f);
     const toScreen = (p: Vec) => worldToScreen(p, ref, camera);
     // A Trail's own points are already relative to *its* `relativeTo` (see
@@ -347,6 +408,10 @@ export class Scene {
     const toScreenRel = (p: Vec) => worldToScreen(p, { x: 0, y: 0 }, camera);
     const labels: Label[] = [];
     const pendingBodies: (() => void)[] = [];
+    // Screen-space furniture that has to wait for the camera transform to be
+    // undone - a RingMarker's off-frame arrowhead, pinned to the edge of the
+    // canvas and so not in world space at all.
+    const pendingOverlay: (() => void)[] = [];
     // Respected, not clobbered: a caller may have set ctx.globalAlpha for a
     // whole-scene crossfade before calling draw() — every per-item alpha
     // below multiplies this in, and every reset restores it rather than a
@@ -400,18 +465,19 @@ export class Scene {
                 const dir = resolveDirection(item.cfg.labelAt, c, f);
                 const p = polar(dir, r);
                 const at = toScreen({ x: c.x + p.x, y: c.y + p.y });
+                const st = labelStyle(item.cfg, theme, false, f);
                 labels.push({
-                  text: item.name,
-                  sub: item.cfg.nameHe,
+                  text: st.text,
+                  sub: st.sub,
                   x: at.x,
                   y: at.y,
-                  dir: polar(dir, 1),
+                  dir: resolveLabelDir(item.cfg.labelDir, f, polar(dir, 1)),
                   gap: item.cfg.labelGap ?? 6,
                   active: false,
                   rank: item.cfg.labelRank ?? 40,
                   color: item.cfg.color,
-                  font: theme.font,
-                  subFont: theme.subFont,
+                  font: st.font,
+                  subFont: st.subFont,
                   alpha: opacity * ambientAlpha,
                   leader: false,
                 });
@@ -445,18 +511,19 @@ export class Scene {
             });
 
             if (showLabels && (item.cfg.showLabel ?? true)) {
+              const st = labelStyle(item.cfg, theme, hot, f);
               labels.push({
-                text: item.name,
-                sub: item.cfg.nameHe,
+                text: st.text,
+                sub: st.sub,
                 x: screenP.x,
                 y: screenP.y,
-                dir: unit(sub(worldP, c)),
+                dir: resolveLabelDir(item.cfg.labelDir, f, unit(sub(worldP, c))),
                 gap: item.cfg.labelGap ?? size + 6,
                 active: hot,
                 rank: item.cfg.labelRank ?? 50,
                 color: item.cfg.color,
-                font: hot ? theme.activeFont : theme.font,
-                subFont: theme.subFont,
+                font: st.font,
+                subFont: st.subFont,
                 alpha: opacity * ambientAlpha,
                 leader: true,
               });
@@ -472,7 +539,8 @@ export class Scene {
             const screenP = toScreen(p);
 
             ctx.globalAlpha = opacity * ambientAlpha;
-            if (marker === 'cross') drawCenterMark(ctx, p, camera.zoom, color, item.cfg.dotSize ?? 5);
+            if (marker === 'cross' || marker === 'crosshair')
+              drawCenterMark(ctx, p, camera.zoom, color, item.cfg.dotSize ?? 5, marker === 'crosshair');
             else if (marker === 'dot') {
               ctx.fillStyle = color;
               ctx.beginPath();
@@ -486,18 +554,19 @@ export class Scene {
                 ? (hover?.mark([screenP], item.name, hoverSub(item.cfg), color, `${item.id}:anchor`) ?? false)
                 : false;
             if (showLabels && marker !== 'none' && (item.cfg.showLabel ?? true)) {
+              const st = labelStyle(item.cfg, theme, hot, f);
               labels.push({
-                text: item.name,
-                sub: item.cfg.nameHe,
+                text: st.text,
+                sub: st.sub,
                 x: screenP.x,
                 y: screenP.y,
-                dir: { x: 1, y: -1 },
+                dir: resolveLabelDir(item.cfg.labelDir, f, { x: 0.7071, y: -0.7071 }),
                 gap: item.cfg.labelGap ?? (item.cfg.dotSize ?? 5) + 6,
                 active: hot,
                 rank: item.cfg.labelRank ?? 30,
                 color: item.cfg.color,
-                font: theme.font,
-                subFont: theme.subFont,
+                font: st.font,
+                subFont: st.subFont,
                 alpha: opacity * ambientAlpha,
                 leader: true,
               });
@@ -518,20 +587,30 @@ export class Scene {
               false;
             if (showLabels && (item.cfg.showLabel ?? true)) {
               const midScreen = toScreen(mid);
-              const value = item.cfg.showValue ? `${item.valueAt(f).toFixed(1)}°` : undefined;
+              const value = item.cfg.showValue ? item.valueTextAt(f) : undefined;
+              const st = labelStyle(item.cfg, theme, hot, f);
+              // An arc's name belongs outside the arc, away from its vertex -
+              // inside it is where the rest of the construction is.
+              const outward = unit(sub(mid, item.vertexAt(f)));
               labels.push({
-                text: item.name,
-                sub: item.cfg.nameHe ?? value,
-                note: item.cfg.nameHe && value ? value : undefined,
+                text: st.text,
+                // Under `hebrewFirst` the gloss and the value are one line
+                // ("the course · 32.1°"): they are a single statement, and
+                // splitting them costs a third line of text on a figure that
+                // is already naming a dozen things at once.
+                sub: item.cfg.hebrewFirst
+                  ? [st.sub, value].filter(Boolean).join(' · ') || undefined
+                  : (st.sub ?? value),
+                note: !item.cfg.hebrewFirst && st.sub && value ? value : undefined,
                 x: midScreen.x,
                 y: midScreen.y,
-                dir: { x: 0, y: -1 },
+                dir: resolveLabelDir(item.cfg.labelDir, f, outward),
                 gap: item.cfg.labelGap ?? 6,
                 active: hot,
                 rank: item.cfg.labelRank ?? 60,
                 color: item.cfg.color,
-                font: theme.font,
-                subFont: theme.subFont,
+                font: st.font,
+                subFont: st.subFont,
                 alpha: opacity * ambientAlpha,
                 leader: false,
               });
@@ -557,22 +636,72 @@ export class Scene {
                 `${item.id}:connector`,
               ) ?? false;
             if (showLabels && (item.cfg.showLabel ?? false)) {
-              const mid = toScreen({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+              const at = toScreen(item.labelPointAt(f));
+              const st = labelStyle(item.cfg, theme, hot, f);
+              // Along the line, away from where it started - a sightline's
+              // name belongs past the end it is pointing at.
+              const along = unit(sub(b, a));
               labels.push({
-                text: item.name,
-                sub: item.cfg.nameHe,
-                x: mid.x,
-                y: mid.y,
-                dir: { x: 0, y: -1 },
+                text: st.text,
+                sub: st.sub,
+                x: at.x,
+                y: at.y,
+                dir: resolveLabelDir(item.cfg.labelDir, f, along),
                 gap: item.cfg.labelGap ?? 6,
                 active: hot,
                 rank: item.cfg.labelRank ?? 45,
                 color: item.cfg.color,
-                font: theme.font,
-                subFont: theme.subFont,
+                font: st.font,
+                subFont: st.subFont,
                 alpha: opacity * ambientAlpha,
                 leader: false,
               });
+            }
+            break;
+          }
+
+          case 'ringmarker': {
+            const p = item.position(f);
+            if (this.checkFinite(item.id, p)) break;
+            const color = item.cfg.color ?? theme.body;
+            const hot =
+              hover?.mark(
+                item.hoverPts(f, toScreen),
+                item.name,
+                hoverSub(item.cfg),
+                color,
+                `${item.id}:marker`,
+              ) ?? false;
+            ctx.globalAlpha = opacity * ambientAlpha;
+            item.draw(ctx, f, camera.zoom, hot ? theme.ink : color);
+            ctx.globalAlpha = ambientAlpha;
+
+            if (showLabels && (item.cfg.showLabel ?? true)) {
+              const at = item.labelPlacement(f, toScreen, bounds);
+              if (at) {
+                const st = labelStyle(item.cfg, theme, hot, f);
+                const alpha = opacity * ambientAlpha;
+                const marker = item;
+                if (at.clipped)
+                  pendingOverlay.push(() =>
+                    marker.drawEdgeArrow(ctx, at, at.dir, hot ? theme.ink : color, alpha),
+                  );
+                labels.push({
+                  text: st.text,
+                  sub: st.sub,
+                  x: at.x,
+                  y: at.y,
+                  dir: at.dir,
+                  gap: item.cfg.labelGap ?? (at.clipped ? 10 : 12),
+                  active: hot,
+                  rank: item.cfg.labelRank ?? 35,
+                  color: hot ? theme.ink : item.cfg.color,
+                  font: st.font,
+                  subFont: st.subFont,
+                  alpha,
+                  leader: false,
+                });
+              }
             }
             break;
           }
@@ -629,6 +758,7 @@ export class Scene {
     ctx.save();
     try {
       for (const drawBody of pendingBodies) drawBody();
+      for (const drawOverlay of pendingOverlay) drawOverlay();
     } finally {
       ctx.restore();
     }
