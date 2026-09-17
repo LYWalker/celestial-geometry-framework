@@ -1,0 +1,499 @@
+---
+/**
+ * A worked proof of the canvas-diagram scene layer (canvas-diagram/scene/):
+ * every object below is declared — a name, an optional Hebrew name,
+ * a description, a radius, what it's centred on, how far off-centre, how
+ * fast it turns — and Scene/Stage/Sphere/Angle/Connector/Trail derive
+ * everything that actually gets drawn, hovered, and labelled. No
+ * trigonometry appears in this file's script: `<script>` below has no
+ * `Math.cos` in it at all.
+ *
+ * It reproduces, in miniature, the constructions Orrery.astro built by
+ * hand: nested shells, the sun's eccentric circle, the moon's epicycle
+ * measured from the earth rather than from its own carrier's centre, a
+ * fading trail, and a custom lit-body renderer — to show what declaring
+ * them as objects buys over deriving their polar coordinates inline.
+ */
+---
+
+<figure class="scene-demo" data-scene-demo>
+  <div
+    class="stage"
+    data-stage
+    tabindex="0"
+    aria-label="A worked example of the scene object model: nested spheres, an eccentric sun, and a moon epicycle. Drag to pan, scroll to zoom, hover a body for what it is, click a body to identify it."
+  >
+    <canvas data-canvas></canvas>
+    <div class="hover-tip" data-hover-tip hidden>
+      <strong data-hover-tip-text></strong>
+      <span data-hover-tip-sub></span>
+    </div>
+  </div>
+  <p class="readout" data-readout></p>
+  <figcaption>
+    Every shape here — the bare nested shells, the sun's off-centre circle,
+    the moon's epicycle — is a <code>Sphere</code> declared with a radius,
+    what it's centred on, an optional offset, and how it turns; the angle
+    between the sun and moon is an <code>Angle</code> pointed at two other
+    objects; the moon's tail is a <code>Trail</code> given only a target and
+    a span. Hover anything for its description, click a body to identify it
+    below; drag to pan, scroll to zoom.
+  </figcaption>
+</figure>
+
+<style>
+  .scene-demo {
+    margin: 0;
+  }
+
+  .stage {
+    position: relative;
+    aspect-ratio: 4 / 3;
+    max-block-size: 70vh;
+    border-radius: 0.75rem;
+    overflow: hidden;
+    background: #070b16;
+    touch-action: none;
+    outline: none;
+  }
+  .stage:focus-visible {
+    box-shadow: 0 0 0 2px var(--accent, #8fb3e6);
+  }
+
+  canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    inline-size: 100%;
+    block-size: 100%;
+    cursor: grab;
+  }
+
+  .hover-tip {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 2;
+    max-inline-size: 15rem;
+    padding: 0.35rem 0.55rem;
+    border-radius: 0.4rem;
+    background: rgba(7, 11, 22, 0.92);
+    color: #e9e6df;
+    font: 500 0.72rem/1.35 "Inter Variable", Inter, system-ui, sans-serif;
+    pointer-events: none;
+  }
+  .hover-tip strong {
+    display: block;
+    font-weight: 600;
+  }
+  .hover-tip span {
+    display: block;
+    margin-top: 0.15rem;
+    color: #96a0bd;
+  }
+
+  .readout {
+    margin: 0.5rem 0 0;
+    font: 500 0.78rem/1.4 "JetBrains Mono Variable", ui-monospace, monospace;
+    color: var(--ink-muted, #96a0bd);
+  }
+
+  figcaption {
+    margin-top: 0.4rem;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--ink-muted, #96a0bd);
+  }
+  figcaption code {
+    font-size: 0.85em;
+  }
+</style>
+
+<script>
+  import { HoverController, type Vec } from '../canvas-diagram';
+  import {
+    Anchor,
+    Angle,
+    Connector,
+    distanceBetween,
+    frame,
+    Scene,
+    Sphere,
+    Stage,
+    Trail,
+    nester,
+    wireCamera,
+    type BodyRenderer,
+    type SceneTheme,
+  } from '../canvas-diagram/scene';
+
+  const SANS = (weight: number, px: number) => ({
+    css: `${weight} ${px}px "Inter Variable", Inter, system-ui, sans-serif`,
+    px,
+  });
+  const HEBREW = (weight: number, px: number) => ({
+    css: `${weight} ${px}px "Frank Ruhl Libre", "SBL Hebrew", David, serif`,
+    px,
+  });
+
+  const THEME: SceneTheme = {
+    font: SANS(500, 11),
+    activeFont: SANS(600, 11),
+    subFont: HEBREW(400, 11.5),
+    noteFont: SANS(500, 9.5),
+    ink: '#e9e6df',
+    dim: '#96a0bd',
+    halo: 'rgba(7,11,22,0.92)',
+    ring: 'rgba(150,168,214,0.35)',
+    body: '#e9e6df',
+    centerMark: 'rgba(224,180,92,0.85)',
+    angle: '#8fd6c9',
+    connector: 'rgba(224,180,92,0.6)',
+    trail: 'rgba(216,212,200,0.5)',
+  };
+
+  const ZODIAC = [
+    'Aries',
+    'Taurus',
+    'Gemini',
+    'Cancer',
+    'Leo',
+    'Virgo',
+    'Libra',
+    'Scorpio',
+    'Sagittarius',
+    'Capricorn',
+    'Aquarius',
+    'Pisces',
+  ];
+
+  /**
+   * A custom body renderer — the extension point that lets a Sphere draw
+   * itself as a lit disc instead of Scene's plain dot, the way Orrery's
+   * Saturn gets a ring and its planets get a day/night terminator. `light`
+   * is a ready-made screen-space unit vector toward the scene's light
+   * source (set via `lightSource` below); a renderer that ignores it, like
+   * the sun's default dot everywhere else in this figure, just doesn't ask
+   * for one.
+   */
+  const litMoon: BodyRenderer = (ctx, b) => {
+    ctx.globalAlpha = b.alpha;
+    ctx.fillStyle = b.color;
+    ctx.beginPath();
+    ctx.arc(b.screen.x, b.screen.y, b.r, 0, 7);
+    ctx.fill();
+
+    if (b.light) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(b.screen.x, b.screen.y, b.r, 0, 7);
+      ctx.clip();
+      const g = ctx.createLinearGradient(
+        b.screen.x - b.light.x * b.r * 0.4,
+        b.screen.y - b.light.y * b.r * 0.4,
+        b.screen.x + b.light.x * b.r * 0.5,
+        b.screen.y + b.light.y * b.r * 0.5,
+      );
+      g.addColorStop(0, 'rgba(7,11,22,0.88)');
+      g.addColorStop(1, 'rgba(7,11,22,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(b.screen.x - b.r, b.screen.y - b.r, b.r * 2, b.r * 2);
+      ctx.restore();
+    }
+
+    if (b.hot) {
+      ctx.save();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(b.screen.x, b.screen.y, b.r + 3, 0, 7);
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  };
+
+  function buildScene() {
+    /* ---- declare the diagram: no trigonometry below this line ----------- */
+
+    const earth = new Anchor({
+      id: 'earth',
+      name: 'The earth',
+      description: 'Everything else in this figure is either centred on it or offset from something that is.',
+      marker: 'cross',
+      color: '#9fb3d9',
+    });
+
+    const nest = nester(46, 30);
+    const rMercury = nest.next();
+    const rSun = nest.next();
+    const rMars = nest.next();
+
+    const mercuryShell = new Sphere({
+      id: 'mercury-shell',
+      name: 'A bare nested shell',
+      description:
+        'Nothing rides this one — showBody: false — it only demonstrates that a Sphere can be a pure construction shell, nested like the others, and still name itself (labelAt) without a body to hang the name off.',
+      center: earth,
+      radius: rMercury,
+      showBody: false,
+      labelAt: 250,
+      color: 'rgba(150,168,214,0.35)',
+    });
+
+    const sun = new Sphere({
+      id: 'sun',
+      name: 'The sun',
+      nameHe: 'חמה',
+      description:
+        "An eccentric circle: it turns at an even rate, but its own centre sits off from the earth by a fixed fraction of its radius — that offset alone is why the sun runs fast in one season and slow in another. Its motion is given as `angle`, not `speed`/`phase`, the hook a real ephemeris function plugs into.",
+      color: '#e0b45c',
+      center: earth,
+      radius: rSun,
+      eccentric: { ratio: 0.09, direction: 65 },
+      angle: (f) => f.t * 22,
+      markCenter: true,
+    });
+
+    const marsShell = new Sphere({
+      id: 'mars-shell',
+      name: 'A further nested shell',
+      description: 'Sphere nesting works outward as freely as inward — this one just sits further out than the sun, sharing the same earth-anchored centre.',
+      center: earth,
+      radius: rMars,
+      showBody: false,
+      labelAt: 250,
+      color: 'rgba(150,168,214,0.35)',
+    });
+
+    const moonDeferent = new Sphere({
+      id: 'moon-deferent',
+      name: "The moon's large circle",
+      nameHe: 'הגלגל הגדול',
+      description:
+        "Carries the small sphere the moon actually rides. It is itself off-centre from the earth, the way every one of the seven spheres is said to be (Yesodei haTorah 11:13) — and its own carried point is measured from the earth (measureFrom), not from its own eccentric centre, which is the real construction the Rambam's moon needs and an ordinary Sphere doesn't: a ray from the earth out to where it meets this circle's rim.",
+      color: 'rgba(146,198,240,0.55)',
+      center: earth,
+      radius: 34,
+      eccentric: { ratio: 0.2, direction: 200 },
+      measureFrom: earth,
+      speed: -8,
+      showBody: false,
+      markCenter: true,
+    });
+
+    const moon = new Sphere({
+      id: 'moon',
+      name: 'The moon',
+      nameHe: 'ירח',
+      description:
+        "An epicycle: this sphere's `center` is not a point, it's the large circle above — this sphere rides wherever that one currently is, with no coordinate math written anywhere to make that happen. Its dot is drawn by a custom renderer (`render`) shaded from the sun's direction, rather than Scene's plain default.",
+      color: '#d8d4c8',
+      center: moonDeferent,
+      radius: 9,
+      speed: 210,
+      dotSize: 5,
+      render: litMoon,
+    });
+
+    const moonTrail = new Trail({
+      id: 'moon-trail',
+      name: "The moon's trail",
+      description:
+        "A rolling window of past positions, replayed under whatever frame is current right now — a Trail needs only a target and a span/step, never a stored history array kept in sync by hand. Joined with a curve, not straight segments, so `step` only has to track the moon's own speed (~10°/sample here) rather than being retuned against how far you're allowed to zoom in.",
+      color: '#d8d4c8',
+      target: moon,
+      relativeTo: earth,
+      span: 5,
+      step: 0.05,
+      bands: 10,
+      opacity: 0.8,
+      // this figure's Frame only ever carries `t` — nothing here reads a
+      // mode-transition amount — so this trail never needs a full rebuild
+      // for anything but the clock advancing
+      dependsOn: [],
+    });
+
+    // The two rays an Angle is actually measured between, drawn so the arc
+    // reads as "the gap between these two lines" rather than floating free.
+    // Ordinary Connectors, each pointed at the same object the Angle sights
+    // toward — nothing about them is specific to Angle at all.
+    const earthToSun = new Connector({
+      id: 'earth-to-sun',
+      name: "Line to the sun",
+      description:
+        'One of the two rays the elongation is measured between — an ordinary Connector from the earth to the sun object, so it always points at wherever the sun currently is.',
+      color: 'rgba(224,180,92,0.5)',
+      from: earth,
+      to: sun,
+      shorten: 7,
+    });
+
+    const earthToMoon = new Connector({
+      id: 'earth-to-moon',
+      name: 'Line to the moon',
+      description: 'The other ray the elongation is measured between.',
+      color: 'rgba(216,212,200,0.5)',
+      from: earth,
+      to: moon,
+      shorten: 8,
+    });
+
+    const elongation = new Angle({
+      id: 'elongation',
+      name: 'Elongation',
+      description:
+        "The angle between the sun and the moon, seen from the earth. An Angle only needs a vertex and two things to sight toward — here, two other objects in the scene — so its bearings are read off their positions, never entered by hand.",
+      vertex: earth,
+      from: sun,
+      to: moon,
+      radius: 20,
+      short: true,
+      showValue: true,
+      color: '#8fd6c9',
+    });
+
+    const apogeeLine = new Connector({
+      id: 'apogee-line',
+      name: "The sun's apogee",
+      description:
+        "A direction, not a path — dashed, this kit's convention throughout for a bearing rather than a route actually travelled. Given as `toward`/`length`, a bearing and a distance, rather than a `to` point the author would otherwise have to compute with polar() themselves.",
+      color: 'rgba(224,180,92,0.6)',
+      from: earth,
+      toward: 65,
+      length: rSun + 26,
+      dashed: true,
+    });
+
+    const scene = new Scene()
+      .add(earth)
+      .add(mercuryShell)
+      .add(sun)
+      .add(marsShell)
+      .add(moonDeferent)
+      .add(moonTrail)
+      .add(moon)
+      .add(earthToSun)
+      .add(earthToMoon)
+      .add(apogeeLine)
+      .add(elongation);
+
+    return { scene, earth, moon, outerRadius: rMars + 20 };
+  }
+
+  function init(root: HTMLElement) {
+    const canvas = root.querySelector<HTMLCanvasElement>('[data-canvas]')!;
+    const stageEl = root.querySelector<HTMLElement>('[data-stage]')!;
+    const tipEl = root.querySelector<HTMLElement>('[data-hover-tip]')!;
+    const tipText = root.querySelector<HTMLElement>('[data-hover-tip-text]')!;
+    const tipSub = root.querySelector<HTMLElement>('[data-hover-tip-sub]')!;
+    const readoutEl = root.querySelector<HTMLElement>('[data-readout]')!;
+
+    const hover = new HoverController({ root: tipEl, text: tipText, sub: tipSub });
+    const { scene, earth, moon, outerRadius } = buildScene();
+
+    const stage = new Stage({
+      canvas,
+      background: {
+        mid: '#0d1526',
+        deep: '#070b16',
+        star: 'rgba(216,212,200,0.75)',
+        vignette: 'rgba(3,5,12,0.55)',
+      },
+      zodiac: {
+        radius: outerRadius,
+        band: 22,
+        segments: ZODIAC.map((name) => ({ name })),
+        color: 'rgba(150,168,214,0.22)',
+      },
+    });
+
+    const start = performance.now();
+    const clock = () => (performance.now() - start) / 1000;
+    let pointer: Vec | null = null;
+
+    function resize() {
+      stage.resize({ fitRadius: outerRadius + 34 });
+      draw();
+    }
+
+    // the sun isn't in scope here by name — fetch it back out of the scene
+    // the way a readout panel or a mode switch would, by id
+    const sun = scene.get('sun', 'sphere');
+
+    // A click flash message, and the readout text itself — both DOM writes
+    // throttled to ~10Hz rather than once a frame: the string changes every
+    // frame regardless (the distance is always a slightly different float),
+    // so diffing the string wouldn't help; textContent forces a layout pass
+    // whether or not the visible text actually looks different at 60fps.
+    let clickFlash = '';
+    let clickFlashUntil = 0;
+    let lastReadoutAt = 0;
+    const READOUT_HZ_MS = 100;
+
+    function draw() {
+      const t = clock();
+      const f = frame(t);
+      // `ref: earth` — Stage/Scene resolve a PointLike themselves; no
+      // `earth.position(f)` call needed at the draw call's own top level.
+      stage.render({ scene, f, ref: earth, theme: THEME, hover, pointer, lightSource: sun });
+
+      if (t * 1000 - lastReadoutAt > READOUT_HZ_MS) {
+        lastReadoutAt = t * 1000;
+        const dist = `earth–moon distance: ${distanceBetween(earth, moon, f).toFixed(1)} px`;
+        readoutEl.textContent = t < clickFlashUntil ? `${clickFlash} · ${dist}` : dist;
+      }
+    }
+
+    const ro = new ResizeObserver(resize);
+    ro.observe(stageEl);
+    resize();
+
+    const unwireCamera = wireCamera({
+      canvas,
+      camera: stage.camera,
+      minZoom: () => stage.fit * 0.5,
+      maxZoom: () => stage.fit * 8,
+      onHover: (p) => {
+        pointer = p;
+      },
+      onPointerDown: () => stageEl.focus({ preventScroll: true }),
+      // Scene.hitTest() — a click handler asks "what did I hit" without
+      // re-deriving worldToScreen() over every object itself.
+      onClick: (p) => {
+        const t = clock();
+        const hit = scene.hitTest(p, { f: frame(t), ref: earth, camera: stage.camera });
+        if (hit) {
+          clickFlash = `clicked: ${hit.name}`;
+          clickFlashUntil = t + 1.5;
+        }
+      },
+    });
+
+    let raf = requestAnimationFrame(function tick() {
+      draw();
+      raf = requestAnimationFrame(tick);
+    });
+
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      unwireCamera();
+    };
+  }
+
+  let teardown: (() => void) | null = null;
+
+  function boot() {
+    teardown?.();
+    teardown = null;
+    const root = document.querySelector<HTMLElement>('[data-scene-demo]');
+    if (root) teardown = init(root);
+  }
+
+  document.addEventListener('astro:page-load', boot);
+  document.addEventListener('astro:before-swap', () => {
+    teardown?.();
+    teardown = null;
+  });
+</script>
