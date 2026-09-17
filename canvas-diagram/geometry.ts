@@ -79,6 +79,96 @@ export function arcPts(c: Vec, r: number, from: number, to: number, cw = false, 
   return pts;
 }
 
+/**
+ * A plane tipped out of the page, seen from a fixed viewpoint square-on to
+ * the page. Two numbers say everything: how far it is tipped, and about
+ * which line.
+ *
+ * That line — the *line of nodes*, where the tilted plane crosses the flat
+ * one — is the only direction in which nothing is foreshortened, which is
+ * why it is the natural thing to state a tilt about rather than an arbitrary
+ * axis. In the sky it is also the thing that matters: the moon is on the
+ * ecliptic only at its nodes, so eclipses happen there and nowhere else.
+ */
+export interface TiltedPlane {
+  /** how far the plane is tipped out of the page, degrees */
+  tilt: number;
+  /** the compass bearing of the line of nodes */
+  nodes: number;
+}
+
+/** Where a point on a tilted plane lands on the page, and how far out of the
+ * page it stands. */
+export interface PlanePoint extends Vec {
+  /** signed distance from the flat plane, in the same units as `r`:
+   * positive toward the viewer, negative away. Zero exactly at the nodes.
+   *
+   * Not a drawing trick — this is the real quantity. For an orbit inclined
+   * `tilt` to the ecliptic, `lon` counted from the ascending node is the
+   * argument of latitude, and `depth` is `r·sin(β)`, the body's height above
+   * the ecliptic plane. A figure can print it, or drop a perpendicular to
+   * the flat plane and be drawing the truth rather than an impression.
+   */
+  depth: number;
+}
+
+/**
+ * A point at bearing `lon` and distance `r` from a tilted plane's centre, as
+ * it projects onto the page.
+ *
+ * `lon` is measured *within the tilted plane itself*, from the same zero
+ * bearing the flat plane uses. The projected bearing that comes back out is
+ * therefore not `lon` — it satisfies tan(λ − Ω) = tan(lon − Ω)·cos(tilt),
+ * which is exactly the relation between a body's argument of latitude and
+ * its ecliptic longitude. The discrepancy is not an artefact to be corrected
+ * for; in an inclination figure it is the subject.
+ */
+export function onPlane(lon: number, r: number, plane: TiltedPlane): PlanePoint {
+  const a = (lon - plane.nodes) * DEG;
+  const t = plane.tilt * DEG;
+  // in the plane's own frame: along the node line, and across it
+  const along = r * Math.cos(a);
+  const across = r * Math.sin(a);
+  // tipping about the node line foreshortens only the across-component, and
+  // is the entire reason anything leaves the page at all
+  const flatAcross = across * Math.cos(t);
+  const u = polar(plane.nodes, 1);
+  // the node line's perpendicular, a quarter turn anticlockwise from it in
+  // the same y-flipped convention polar() uses. Getting this the other way
+  // round mirrors the plane about its own node line: harmless-looking, and
+  // it puts the body south of the flat plane exactly when it should be north.
+  const w = polar(plane.nodes + 90, 1);
+  return {
+    x: along * u.x + flatAcross * w.x,
+    y: along * u.y + flatAcross * w.y,
+    depth: across * Math.sin(t),
+  };
+}
+
+/** Points sampled along a tilted circle, from `from` to `to` (degrees,
+ * measured in the plane), as they project onto the page. A tilted circle is
+ * an ellipse and `ctx.arc` cannot draw it, so every planed ring in this kit
+ * — drawn, hovered or highlighted — comes from here. */
+export function planeArcPts(
+  c: Vec,
+  r: number,
+  plane: TiltedPlane,
+  from = 0,
+  to = 360,
+  n = 64,
+): PlanePoint[] {
+  const pts: PlanePoint[] = [];
+  // n = 0 is a legitimate ask — "just the point at `from`" — and dividing
+  // by it would hand back NaN, which propagates silently into a label's
+  // direction or a hover zone long after the call that caused it.
+  const step = n > 0 ? (to - from) / n : 0;
+  for (let i = 0; i <= n; i++) {
+    const p = onPlane(from + step * i, r, plane);
+    pts.push({ x: c.x + p.x, y: c.y + p.y, depth: p.depth });
+  }
+  return pts;
+}
+
 /** Points sampled all the way round a circle — for hover-testing or highlighting its rim. */
 export function circlePts(c: Vec, r: number, n = 32): Vec[] {
   const pts: Vec[] = [];

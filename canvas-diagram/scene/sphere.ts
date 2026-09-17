@@ -21,7 +21,7 @@
  * position(f) is always "where the thing on it actually is."
  */
 
-import { polar, norm360, type Vec } from '../geometry.js';
+import { onPlane, polar, norm360, type PlanePoint, type TiltedPlane, type Vec } from '../geometry.js';
 import {
   type BodyRenderer,
   type BoolLike,
@@ -51,6 +51,29 @@ export interface EccentricConfig {
   direction: DirectionLike;
 }
 
+/**
+ * Tip this sphere's whole plane out of the page — an orbit inclined to the
+ * one the figure is drawn in. Stated the way the sky states it: how far it
+ * is tipped, and the bearing of the line of nodes it is tipped about.
+ *
+ * The projection is exact, not an impression. `angle` is then measured
+ * *within the tilted plane* (a body's argument of latitude), the projected
+ * bearing that comes out is its longitude in the flat plane, and
+ * `depthAt()` is its real height above that plane. See `onPlane`.
+ */
+export interface PlaneConfig {
+  /** degrees out of the page — a Scalar, so a figure can exaggerate a
+   * small inclination under a slider without lying about anything else */
+  tilt: Scalar;
+  /** the bearing of the line of nodes; a DirectionLike, since real nodes
+   * move (the moon's regress once round in 18.6 years) */
+  nodes: DirectionLike;
+  /** how much of its opacity the half behind the flat plane keeps, 0-1.
+   * Default 0.4 — enough to read as a continuing line, little enough that
+   * which half is in front is never in question. */
+  behindFade?: number;
+}
+
 export interface SphereConfig extends Meta {
   /** this sphere's own radius, world px — a fixed size, or a function of
    * the frame for a construction whose reach changes (a distance-scale
@@ -74,6 +97,13 @@ export interface SphereConfig extends Meta {
    * `angle: (f) => rambamSun(f.t).mean`). Takes precedence over
    * `speed`/`phase` when given. */
   angle?: Scalar;
+  /** tip this sphere's plane out of the page (see PlaneConfig). Its rim
+   * then draws as an ellipse rather than a circle, and the carried point
+   * gains a real depth, which `depthAt()` reports. Cannot be combined with
+   * `measureFrom`, which solves a ray against a circle and has no meaning
+   * against a tilted one — the constructor rejects the pair rather than
+   * quietly drawing something that isn't the construction asked for. */
+  plane?: PlaneConfig;
   /** measure `angle` from this point instead of from this sphere's own
    * centre, and place the carried point at the near intersection of that
    * ray with this sphere's rim — the construction the Rambam's moon needs
@@ -124,9 +154,17 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
   private memoRadius: number | undefined;
   private memoAngle: number | undefined;
   private memoPosition: Vec | undefined;
+  private memoPlane: TiltedPlane | undefined;
 
   constructor(cfg: SphereConfig) {
     super(cfg);
+    if (cfg.plane !== undefined && cfg.measureFrom !== undefined) {
+      throw new Error(
+        `canvas-diagram Sphere "${cfg.id}": \`plane\` and \`measureFrom\` can't be combined — ` +
+          `measureFrom solves a ray against this sphere's *circle*, which a tilted plane no longer is. ` +
+          `Drop one, or express the tilted case as its own object.`,
+      );
+    }
     if (cfg.labelAt !== undefined && (cfg.showBody ?? (cfg.speed !== undefined || cfg.angle !== undefined))) {
       console.warn(
         `canvas-diagram Sphere "${cfg.id}": labelAt has no effect when showBody is true — the carried body's own label covers that case.`,
@@ -138,6 +176,7 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
     if (this.memoFrame !== f) {
       this.memoFrame = f;
       this.memoCenter = this.memoRadius = this.memoAngle = this.memoPosition = undefined;
+      this.memoPlane = undefined;
     }
   }
 
@@ -181,7 +220,14 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
       } else {
         const r = resolveScalar(ecc.ratio, f) * this.radiusAt(f);
         const dir = resolveDirection(ecc.direction, base, f);
-        const off = polar(dir, r);
+        // The offset lies in this sphere's own plane, so when that plane is
+        // tilted the offset is foreshortened with it. Reading `cfg.plane`
+        // directly rather than via planeAt(), which would recurse: planeAt
+        // resolves its `nodes` DirectionLike against this very centre.
+        const p = this.cfg.plane;
+        const off = p
+          ? onPlane(dir, r, { tilt: resolveScalar(p.tilt, f), nodes: resolveDirection(p.nodes, base, f) })
+          : polar(dir, r);
         this.memoCenter = { x: base.x + off.x, y: base.y + off.y };
       }
     }
@@ -208,6 +254,60 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
     return this.memoAngle;
   }
 
+  /** This sphere's plane at this moment, or null when it lies flat in the
+   * page like everything else. */
+  planeAt(f: Frame): TiltedPlane | null {
+    const p = this.cfg.plane;
+    if (!p) return null;
+    this.resetIfStale(f);
+    if (this.memoPlane === undefined) {
+      this.memoPlane = {
+        tilt: resolveScalar(p.tilt, f),
+        // normalised, like angleAt(): the maths is indifferent, but a figure
+        // that reads this back to print it or to draw the node line itself
+        // should get a bearing, not whatever a Scalar happened to return
+        nodes: norm360(resolveDirection(p.nodes, this.centerAt(f), f)),
+      };
+    }
+    return this.memoPlane;
+  }
+
+  /** How far the carried point stands out of the page, in world px —
+   * positive toward the viewer, negative away, and 0 for a sphere lying
+   * flat. A figure reads this to fade what is behind, to drop a
+   * perpendicular to the flat plane, or to print the height itself. */
+  depthAt(f: Frame): number {
+    const plane = this.planeAt(f);
+    if (!plane) return 0;
+    return onPlane(this.angleAt(f), this.radiusAt(f), plane).depth;
+  }
+
+  /** The rim, sampled and projected — an ellipse when this sphere is
+   * tilted, and what every planed ring in this kit is drawn, hovered and
+   * highlighted from, since `ctx.arc` cannot draw one. Each point carries
+   * its own depth, so a caller can split the near half from the far. */
+  rimAt(f: Frame, from = 0, to = 360, n = 64): PlanePoint[] {
+    const plane = this.planeAt(f);
+    const c = this.centerAt(f);
+    const r = this.radiusAt(f);
+    const pts: PlanePoint[] = [];
+    // n = 0 means "just the point at `from`" — the shape a label or a node
+    // marker asks for. Dividing by it would return NaN, which does not fail
+    // here but far away, as a label direction or a hover zone.
+    const step = n > 0 ? (to - from) / n : 0;
+    for (let i = 0; i <= n; i++) {
+      const lon = from + step * i;
+      if (plane) {
+        const p = onPlane(lon, r, plane);
+        pts.push({ x: c.x + p.x, y: c.y + p.y, depth: p.depth });
+      } else {
+        const p = polar(lon, r);
+        pts.push({ x: c.x + p.x, y: c.y + p.y, depth: 0 });
+      }
+    }
+    return pts;
+  }
+
   /** Where the thing riding this sphere's rim actually is — the number every
    * other object (a nested sphere, an angle, a connector) reads off it. */
   position(f: Frame): Vec {
@@ -219,7 +319,8 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
         const origin = resolvePoint(this.cfg.measureFrom, f);
         this.memoPosition = rayCircleFar(origin, this.angleAt(f), c, r);
       } else {
-        const p = polar(this.angleAt(f), r);
+        const plane = this.planeAt(f);
+        const p = plane ? onPlane(this.angleAt(f), r, plane) : polar(this.angleAt(f), r);
         this.memoPosition = { x: c.x + p.x, y: c.y + p.y };
       }
     }

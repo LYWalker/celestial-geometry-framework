@@ -19,7 +19,7 @@
  * units, and would scale wrongly under a zoomed-in transform.
  */
 
-import { FULL_CIRCLE, sub, polar, unit, type Vec } from '../geometry.js';
+import { FULL_CIRCLE, sub, unit, type PlanePoint, type Vec } from '../geometry.js';
 import { applyCamera, worldToScreen, type Camera } from '../camera.js';
 import type { Face, Label, LabelTheme } from '../labels.js';
 import type { HoverController } from '../hover.js';
@@ -81,6 +81,11 @@ function layerOf(item: SceneItem): number {
       return assertNever(item);
   }
 }
+
+/** How much of its own opacity the half of a tilted rim that is behind the
+ * flat plane keeps. Enough to stay legible as a continuing line, little
+ * enough that which half is in front is never in question. */
+const DEFAULT_BEHIND_FADE = 0.4;
 
 const defaultBodyRenderer: BodyRenderer = (ctx, b) => {
   ctx.globalAlpha = b.alpha;
@@ -442,16 +447,56 @@ export class Scene {
             const color = item.cfg.color ?? theme.ring;
 
             if (item.showRing && showRings) {
+              const plane = item.planeAt(f);
               ctx.globalAlpha = opacity * ambientAlpha;
               ctx.strokeStyle = color;
-              ctx.beginPath();
-              ctx.arc(c.x, c.y, r, 0, FULL_CIRCLE);
-              ctx.stroke();
-              // An exact analytic hover zone (not a 32-gon approximation),
-              // and registered unconditionally now — the sun's own eccentric
-              // circle is exactly the kind of line a figure most wants
-              // hoverable, and its `:ring`/`:body` ids no longer collide.
-              hover?.markCircle(toScreen(c), r * camera.zoom, item.name, hoverSub(item.cfg), color, `${item.id}:ring`);
+              if (!plane) {
+                ctx.beginPath();
+                ctx.arc(c.x, c.y, r, 0, FULL_CIRCLE);
+                ctx.stroke();
+                // An exact analytic hover zone (not a 32-gon approximation),
+                // and registered unconditionally now — the sun's own eccentric
+                // circle is exactly the kind of line a figure most wants
+                // hoverable, and its `:ring`/`:body` ids no longer collide.
+                hover?.markCircle(toScreen(c), r * camera.zoom, item.name, hoverSub(item.cfg), color, `${item.id}:ring`);
+              } else {
+                // A tilted rim is an ellipse, which ctx.arc cannot draw, so
+                // it is sampled — and split at the nodes, which is exactly
+                // where it crosses the flat plane. The half behind is drawn
+                // fainter and first, so the two halves cross each other the
+                // right way round and the tilt reads as a tilt rather than
+                // as a squashed circle.
+                //
+                // Both halves are drawn before the bodies, like any other
+                // ring: a rim centred on a body never comes closer to it
+                // than r*cos(tilt), so there is nothing to hide behind.
+                // A figure whose tilt is steep enough for that to stop being
+                // true can say so with `layer`.
+                const half = 180;
+                const a = item.rimAt(f, plane.nodes, plane.nodes + half, 48);
+                const b = item.rimAt(f, plane.nodes + half, plane.nodes + 2 * half, 48);
+                const aIsNear = (a[a.length >> 1]?.depth ?? 0) >= 0;
+                const near = aIsNear ? a : b;
+                const far = aIsNear ? b : a;
+                const behind = item.cfg.plane?.behindFade ?? DEFAULT_BEHIND_FADE;
+                const stroke = (pts: PlanePoint[], alpha: number) => {
+                  ctx.globalAlpha = alpha;
+                  ctx.beginPath();
+                  // pts is never empty: rimAt always returns n + 1 points.
+                  ctx.moveTo(pts[0]!.x, pts[0]!.y);
+                  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i]!.x, pts[i]!.y);
+                  ctx.stroke();
+                };
+                stroke(far, opacity * ambientAlpha * behind);
+                stroke(near, opacity * ambientAlpha);
+                hover?.mark(
+                  [...far, ...near].map(toScreen),
+                  item.name,
+                  hoverSub(item.cfg),
+                  color,
+                  `${item.id}:ring`,
+                );
+              }
               ctx.globalAlpha = ambientAlpha;
             }
             if (showConstruction && resolveBool(item.cfg.markCenter, f)) {
@@ -463,15 +508,17 @@ export class Scene {
             if (!item.showBody) {
               if (showLabels && (item.cfg.showLabel ?? true) && item.cfg.labelAt !== undefined) {
                 const dir = resolveDirection(item.cfg.labelAt, c, f);
-                const p = polar(dir, r);
-                const at = toScreen({ x: c.x + p.x, y: c.y + p.y });
+                // on the rim as drawn, which for a tilted sphere is not
+                // where polar(dir, r) would put it
+                const on = item.rimAt(f, dir, dir, 0)[0]!;
+                const at = toScreen(on);
                 const st = labelStyle(item.cfg, theme, false, f);
                 labels.push({
                   text: st.text,
                   sub: st.sub,
                   x: at.x,
                   y: at.y,
-                  dir: resolveLabelDir(item.cfg.labelDir, f, polar(dir, 1)),
+                  dir: resolveLabelDir(item.cfg.labelDir, f, unit(sub(on, c))),
                   gap: item.cfg.labelGap ?? 6,
                   active: false,
                   rank: item.cfg.labelRank ?? 40,
