@@ -148,11 +148,47 @@ case-by-case plumbing:
   straightforward figure needs per frame (background, zodiac, the Scene,
   the hover tooltip, labels, the hover highlight, in the order they have to
   happen in).
+- **`ZodiacRing`** is that ring as an object, and it sizes itself: give it
+  `segments` (and `padding`, world px of clearance, default 28) and it sits
+  just outside the furthest thing `Scene.extent()` finds, instead of a
+  radius the figure has to keep in step with its own geometry. Declare it
+  before the scene and its `inner`/`outer` are ordinary Scalars, so a dial
+  line reaches exactly to it — `length: ring.outer` — and so does
+  `resize({ fitRadius: ring.outer(f) + 8 })`. A line drawn to the ring
+  doesn't push the ring out. Pass `radius` to place it by hand instead, or
+  `fit: 'grow'` for a scene whose outermost object swings (an eccentric
+  orbit), which settles the ring at the furthest reach rather than letting
+  it breathe; `warm()` settles it before the first frame.
 - **`wireCamera`** wires a canvas's wheel/pointer events to the pan/zoom
   math in `camera.ts`: wheel and pinch zoom on the point under the
   cursor/fingers, one-finger drag pans, a drag that never really moved
-  resolves as a click. What a click *does* stays the caller's, via
-  `onClick`.
+  resolves as a click, and the keyboard pans/zooms/resets once the figure
+  has focus. What a click *does* stays the caller's, via `onClick`; what
+  `0` resets to is `onReset` (default: the view the figure opened with).
+- **`wireResize`** keeps a figure sized to its element, and handles the case
+  that's easy to get wrong: an element with no layout yet (a hidden tab, a
+  closed `<details>`) can't be measured, and is simply resized again when it
+  gains a size rather than leaving a permanently blank canvas.
+- **`wireAnimationLoop`** runs the clock, pausing itself off-screen and
+  under `prefers-reduced-motion` — without stopping the figure responding
+  to interaction.
+
+### The state around a figure
+
+- **`Transitions`** owns the named, eased amounts a `Frame` is built from —
+  "the view is sliding from heliocentric to geocentric," "the shells are
+  fading in." A figure sets targets (`view.set({ shellT: 1 })`), advances
+  them by the frame's elapsed seconds, and asks for a Frame
+  (`view.frame(days)`); the framerate-independent approach, the settling,
+  and the frame assembly are all here rather than in each figure's tick().
+- **`Selection`** is "click a body to follow it": what's selected, what a
+  click does to that, and which point the camera should hold still —
+  `stage.render({ ref: following.ref() })`. `selectable` limits what may be
+  followed at all.
+- **`describeScene`/`describeSceneInto`** derive a figure's text alternative
+  from the objects themselves — every named object's name and description,
+  the same data the hover tooltip shows — so the accessible version of a
+  figure can't drift from what's actually declared.
 
 ## The worked example
 

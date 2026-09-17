@@ -11,10 +11,11 @@
 
 import { DEG, FULL_CIRCLE, type Box, type Vec } from '../geometry.js';
 import { panBy, pinchAt, worldToScreen, zoomAt, type Camera } from '../camera.js';
-import { drawLabels as drawLabelsKit, type Face, type Label, type LabelTheme } from '../labels.js';
+import { drawLabels as drawLabelsKit, type Label, type LabelTheme } from '../labels.js';
 import type { HoverController } from '../hover.js';
 import type { Scene, SceneTheme } from './scene.js';
-import { ORIGIN, resolvePoint, type Frame, type PointLike } from './types.js';
+import { ZodiacRing, type ZodiacConfig, type ZodiacGeometry } from './zodiac.js';
+import { resolvePoint, type Frame, type PointLike } from './types.js';
 
 export interface BackgroundTheme {
   /** the gradient behind the whole stage, centre to edge */
@@ -26,29 +27,14 @@ export interface BackgroundTheme {
   vignette: string;
 }
 
-export interface ZodiacSegment {
-  name: string;
-  nameHe?: string;
-}
-
-export interface ZodiacConfig {
-  /** the ring's inner radius, world px — usually the outermost sphere's */
-  radius: number;
-  /** how wide the band of names is, world px */
-  band?: number;
-  segments: ZodiacSegment[];
-  font?: Face;
-  color?: string;
-  /** the world point the ring is centred on. Default the origin — a zodiac
-   * is a fixed backdrop, not tied to whatever the camera's `ref` happens to
-   * be (which is why this is its own field rather than reusing `ref`). */
-  center?: PointLike;
-}
-
 export interface StageConfig {
   canvas: HTMLCanvasElement;
   background?: BackgroundTheme | false;
-  zodiac?: ZodiacConfig | false;
+  /** the ring of named segments at the figure's edge. Pass a plain config
+   * for a ring nothing else needs to know about, or a ZodiacRing the figure
+   * built itself — which is what lets its own dial lines reach exactly to
+   * the ring (`length: ring.outer`) without restating where that is. */
+  zodiac?: ZodiacConfig | ZodiacRing | false;
 }
 
 interface Star {
@@ -145,6 +131,10 @@ export class Stage {
 
   private stars: Star[] = [];
   private zodiacBoxes: Box[] = [];
+  /** the ring itself — the figure's own ZodiacRing when it built one (so
+   * `ring.outer` and what's drawn are the same object), otherwise one
+   * wrapped around the plain config it was given */
+  private ring: ZodiacRing | null = null;
   /** rebuilt only in resize() — cx/cy/w/h (what these depend on) never
    * change outside it; pan/zoom, which do change every frame, don't affect
    * either gradient's own stops, only where drawBackground paints them */
@@ -157,6 +147,7 @@ export class Stage {
 
   constructor(private cfg: StageConfig) {
     this.ctx = cfg.canvas.getContext('2d')!;
+    this.ring = toRing(cfg.zodiac);
   }
 
   /**
@@ -253,8 +244,15 @@ export class Stage {
    * drawZodiac() derives its ring and label boxes fresh from `cfg.zodiac`
    * every call, so this is just the assignment, exposed alongside
    * setBackground() for a symmetrical retheming API. */
-  setZodiac(z: ZodiacConfig | false): void {
+  setZodiac(z: ZodiacConfig | ZodiacRing | false): void {
     this.cfg.zodiac = z;
+    // A ZodiacRing the caller already holds keeps its own identity (its
+    // `inner`/`outer` Scalars are wired into the scene); a plain config
+    // re-themes the ring in place, which discards its measurement — see
+    // ZodiacRing.set(). Either way nothing else in the figure has to be
+    // rebuilt to follow.
+    if (z instanceof ZodiacRing || !z || !this.ring) this.ring = toRing(z);
+    else this.ring.set(z);
   }
 
   /** Release this Stage's own resources — the star-glow sprite canvas, the
@@ -373,25 +371,47 @@ export class Stage {
   }
 
   /**
+   * Where the zodiac ring sits this frame, in world px — `null` when there
+   * is no ring, or when an auto-sized one hasn't been given a Scene to
+   * measure yet. A figure that holds its own ZodiacRing can ask it directly
+   * (`ring.outer(f)`); this is the same answer, for one built from a plain
+   * config, and is what a resize handler wants for `fitRadius`.
+   *
+   * `scene` is what an auto radius measures; render() passes the Scene it
+   * draws, and the ring remembers it, so a later call needn't repeat it.
+   */
+  zodiacGeometry(f: Frame, scene?: Scene): ZodiacGeometry | null {
+    if (!this.ring) return null;
+    if (scene) this.ring.fitTo(scene);
+    return this.ring.geometry(f);
+  }
+
+  /**
    * The optional ring of named segments at the diagram's edge, centred on
    * `zodiac.center` (world space, default the origin) — resolved against
    * `ref` the same way anything else in the scene is, via `f`/`ref`. Returns
    * the screen boxes its labels occupy, for a Scene's own labels to avoid;
    * you don't need to collect this yourself if you use `drawLabels()`/`render()`.
    */
-  drawZodiac(f: Frame, ref: Vec, opts: { alpha?: number | undefined; labels?: boolean | undefined } = {}): Box[] {
+  drawZodiac(
+    f: Frame,
+    ref: Vec,
+    opts: { alpha?: number | undefined; labels?: boolean | undefined; scene?: Scene | undefined } = {},
+  ): Box[] {
     this.zodiacBoxes = [];
-    const z = this.cfg.zodiac;
-    if (!z) return [];
+    const ring = this.ring;
+    if (!ring) return [];
+    const z = ring.cfg;
+    const geom = this.zodiacGeometry(f, opts.scene);
+    if (!geom || geom.radius <= 0) return [];
     const ctx = this.ctx;
     const cam = this.camera;
     const alpha = opts.alpha ?? 1;
-    const centerWorld = resolvePoint(z.center ?? ORIGIN, f);
-    const centerScreen = worldToScreen(centerWorld, ref, cam);
+    const centerScreen = worldToScreen(geom.center, ref, cam);
     const cx = centerScreen.x;
     const cy = centerScreen.y;
-    const R = z.radius * cam.zoom;
-    const band = (z.band ?? z.radius * 0.18) * cam.zoom;
+    const R = geom.radius * cam.zoom;
+    const band = geom.band * cam.zoom;
     const R2 = R + band;
     if (R2 > Math.hypot(this.w, this.h) * 3) return [];
 
@@ -494,7 +514,7 @@ export class Stage {
   }): void {
     const ref = resolvePoint(opts.ref, opts.f);
     this.drawBackground(opts.backgroundTime ?? performance.now());
-    this.drawZodiac(opts.f, ref, { alpha: opts.zodiacAlpha, labels: opts.zodiacLabels });
+    this.drawZodiac(opts.f, ref, { alpha: opts.zodiacAlpha, labels: opts.zodiacLabels, scene: opts.scene });
     opts.beforeScene?.();
     const labels = opts.scene.draw({
       ctx: this.ctx,
@@ -513,6 +533,13 @@ export class Stage {
     this.drawLabels(labels, opts.theme, opts.extraObstacles);
     if (opts.hover) opts.hover.drawHighlight(this.ctx, opts.theme.ink);
   }
+}
+
+/** A Stage takes either a ring the figure built (so its `inner`/`outer`
+ * Scalars and what gets drawn can't disagree) or a plain config to wrap. */
+function toRing(z: ZodiacConfig | ZodiacRing | false | undefined): ZodiacRing | null {
+  if (!z) return null;
+  return z instanceof ZodiacRing ? z : new ZodiacRing(z);
 }
 
 /** update()'s default wheel-zoom feel — how many "zoom factor e-foldings"
@@ -543,6 +570,11 @@ export interface CameraWireOptions {
    * selection) wants this rather than onHover(null), which also fires on
    * every move of an already-started drag. */
   onDragStart?: () => void;
+  /** what the '0' key resets the view to. Without this, it restores the
+   * zoom and pan the camera had when wireCamera() was called — fine for a
+   * figure whose frame never changes, wrong for one that re-fits on resize
+   * or has its own "reset view" button, which should be this callback. */
+  onReset?: () => void;
   /** the pointer just went down — before it's known whether this becomes a
    * drag, a pinch, or a click. Orrery uses this to move keyboard focus onto
    * the canvas on click; nothing else in this wiring happens early enough
@@ -758,9 +790,12 @@ export function wireCamera(opts: CameraWireOptions): () => void {
         zoomAt(camera, 0, 0, 1 / KEY_ZOOM_FACTOR, minZoom(), maxZoom());
         break;
       case '0':
-        camera.zoom = resetTo.zoom;
-        camera.pan.x = resetTo.pan.x;
-        camera.pan.y = resetTo.pan.y;
+        if (opts.onReset) opts.onReset();
+        else {
+          camera.zoom = resetTo.zoom;
+          camera.pan.x = resetTo.pan.x;
+          camera.pan.y = resetTo.pan.y;
+        }
         break;
       default:
         return; // not a key this handler understands — leave it alone
@@ -780,6 +815,40 @@ export function wireCamera(opts: CameraWireOptions): () => void {
     window.removeEventListener('resize', invalidateRect);
     window.removeEventListener('scroll', invalidateRect, true);
     window.removeEventListener('keydown', onKeyDown);
+  };
+}
+
+/**
+ * Keep a figure sized to its element: calls `onResize` whenever the element's
+ * box changes, and once immediately so a caller doesn't also have to.
+ *
+ * It exists mostly for the case that's easy to get wrong. An element with no
+ * layout yet — inside a `display: none` tab, an unopened `<details>`, or
+ * simply not laid out at the moment the component initialises — can't be
+ * measured, and `Stage.resize()` says so by returning `false` rather than
+ * rendering a blank figure. A caller that ignores that ends up with a
+ * permanently empty canvas; here it's simply the state the observer is
+ * already waiting for, since gaining a size is itself a resize and fires
+ * this again. `onResize` may return `false` to say "still not measurable,"
+ * which is only used to skip the redundant work a caller would otherwise do.
+ *
+ * Window resizes are watched too: a move to a monitor with a different
+ * devicePixelRatio changes the backing store a figure needs without
+ * changing its CSS box at all, so a ResizeObserver alone would miss it.
+ */
+export function wireResize(target: Element, onResize: () => boolean | void): () => void {
+  let disposed = false;
+  const run = () => {
+    if (!disposed) onResize();
+  };
+  const ro = new ResizeObserver(run);
+  ro.observe(target);
+  window.addEventListener('resize', run);
+  run();
+  return () => {
+    disposed = true;
+    ro.disconnect();
+    window.removeEventListener('resize', run);
   };
 }
 

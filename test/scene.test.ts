@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { Scene, type SceneTheme } from '../canvas-diagram/scene/scene.js';
 import { Sphere } from '../canvas-diagram/scene/sphere.js';
 import { Anchor } from '../canvas-diagram/scene/anchor.js';
+import { Connector } from '../canvas-diagram/scene/connector.js';
 import { frame } from '../canvas-diagram/scene/types.js';
 import type { Camera } from '../canvas-diagram/camera.js';
 import { makeFakeCtx } from './helpers/fakeCtx.js';
@@ -66,5 +67,76 @@ describe('Scene.draw label alpha (regression: labels.push used to ignore ambient
     const label = labels.find((l) => l.text === 'Body2');
     assert.ok(label);
     assert.ok(near(label!.alpha, 0.7));
+  });
+});
+
+describe('Scene.extent (what an auto-sized zodiac ring measures)', () => {
+  test('reaches the far edge of a sphere ring, not just its centre', () => {
+    const earth = new Anchor({ id: 'e', name: 'E', marker: 'none' });
+    const shell = new Sphere({ id: 'shell', name: 'Shell', center: earth, radius: 120, showBody: false });
+    const scene = new Scene().add(earth).add(shell);
+
+    assert.ok(near(scene.extent(frame(0)), 120));
+  });
+
+  test('an off-centre ring is measured from the centre asked about, not its own', () => {
+    const earth = new Anchor({ id: 'e2', name: 'E2', marker: 'none' });
+    const shell = new Sphere({
+      id: 'shell2',
+      name: 'Shell2',
+      center: { x: 30, y: 0 },
+      radius: 100,
+      showBody: false,
+    });
+    const scene = new Scene().add(earth).add(shell);
+
+    assert.ok(near(scene.extent(frame(0)), 130));
+  });
+
+  test('a connector reaching past every ring sets the extent', () => {
+    const earth = new Anchor({ id: 'e3', name: 'E3', marker: 'none' });
+    const shell = new Sphere({ id: 'shell3', name: 'Shell3', center: earth, radius: 50, showBody: false });
+    const sightline = new Connector({ id: 'sight', name: 'Sightline', from: earth, toward: 0, length: 200 });
+    const scene = new Scene().add(earth).add(shell).add(sightline);
+
+    assert.ok(near(scene.extent(frame(0)), 200));
+  });
+
+  test('excludeFromExtent leaves a sightline out — the ring it points at may not chase it', () => {
+    const earth = new Anchor({ id: 'e4', name: 'E4', marker: 'none' });
+    const shell = new Sphere({ id: 'shell4', name: 'Shell4', center: earth, radius: 50, showBody: false });
+    const sightline = new Connector({
+      id: 'sight2',
+      name: 'Sightline2',
+      from: earth,
+      toward: 0,
+      length: 200,
+      excludeFromExtent: true,
+    });
+    const scene = new Scene().add(earth).add(shell).add(sightline);
+
+    assert.ok(near(scene.extent(frame(0)), 50));
+  });
+
+  test('something faded out is not measured', () => {
+    const earth = new Anchor({ id: 'e5', name: 'E5', marker: 'none' });
+    const near1 = new Sphere({ id: 'near', name: 'Near', center: earth, radius: 40, showBody: false });
+    const far = new Sphere({ id: 'far', name: 'Far', center: earth, radius: 400, showBody: false, opacity: 0 });
+    const scene = new Scene().add(earth).add(near1).add(far);
+
+    assert.ok(near(scene.extent(frame(0)), 40));
+  });
+
+  test('an anchor with marker "none" is never drawn, so never measured', () => {
+    const earth = new Anchor({ id: 'e6', name: 'E6', marker: 'none' });
+    const ghost = new Anchor({ id: 'ghost', name: 'Ghost', at: { x: 500, y: 0 }, marker: 'none' });
+    const mark = new Anchor({ id: 'mark', name: 'Mark', at: { x: 80, y: 0 }, marker: 'cross' });
+    const scene = new Scene().add(earth).add(ghost).add(mark);
+
+    assert.ok(near(scene.extent(frame(0)), 80));
+  });
+
+  test('an empty scene reaches nowhere', () => {
+    assert.equal(new Scene().extent(frame(0)), 0);
   });
 });

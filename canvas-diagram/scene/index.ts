@@ -43,4 +43,8 @@ export * from './angle.js';
 export * from './connector.js';
 export * from './trail.js';
 export * from './scene.js';
+export * from './zodiac.js';
+export * from './transitions.js';
+export * from './selection.js';
+export * from './describe.js';
 export * from './stage.js';

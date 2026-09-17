@@ -33,6 +33,7 @@ import {
   type BodyRenderer,
   type Frame,
   type PointLike,
+  ORIGIN,
   resolveBool,
   resolveDirection,
   resolvePoint,
@@ -184,6 +185,88 @@ export class Scene {
    * sorted order is otherwise cached across frames and won't notice. */
   invalidateOrder(): void {
     this.ordered = null;
+  }
+
+  /** Throw away every object's per-Frame memo (Sphere's resolved centre and
+   * radius, Angle's sweep, Connector's endpoints), so the next read
+   * re-derives them even within the Frame they were cached under — the
+   * bulk form of each object's own `invalidate()`, for something that
+   * changes what they resolve to *mid-frame*. `extent()` uses it: measuring
+   * the scene resolves objects at a moment when anything sized from the
+   * measurement itself (an auto-sized ring, and the dial lines drawn out to
+   * it) deliberately reads as zero, and those provisional answers must not
+   * be the ones the same frame then draws. */
+  invalidateResolved(): void {
+    for (const item of this.items) {
+      if ('invalidate' in item) item.invalidate();
+    }
+  }
+
+  /**
+   * How far the scene reaches from a point, right now — the world-px radius
+   * of the smallest circle centred on `center` that contains everything
+   * drawn: a Sphere's whole ring and the body riding it, an Angle's arc,
+   * both ends of a Connector, every sample of a Trail, and an Anchor that
+   * has a marker of its own. Anything currently faded out via `opacity`,
+   * and an Anchor with `marker: 'none'` (a reference point that's never
+   * drawn), are left out — the question this answers is "how much room does
+   * the picture need," not "where could something be." So is anything
+   * marked `excludeFromExtent` (see Meta), for a sightline drawn out to
+   * whatever this measurement itself sizes.
+   *
+   * Stage's zodiac ring sizes itself with this (see `ZodiacConfig.radius`);
+   * a figure can call it directly for its own `resize({ fitRadius })`.
+   *
+   * `ref` is the point the draw call recentres on — needed only because a
+   * Trail's samples are stored already relative to it — and defaults to
+   * `center`, which is what a figure whose camera and zodiac share a centre
+   * wants. Returns 0 for an empty scene (or one with nothing visible).
+   *
+   * Resolved fresh per call, like everything else here: for a scene whose
+   * outermost object *moves*, the answer moves with it. A caller that wants
+   * a ring that doesn't breathe should size it from geometry that doesn't
+   * either — a fixed outermost shell — or cache the value itself.
+   */
+  extent(f: Frame, opts: { center?: PointLike; ref?: PointLike } = {}): number {
+    const center = resolvePoint(opts.center ?? ORIGIN, f);
+    const ref = opts.ref === undefined ? center : resolvePoint(opts.ref, f);
+    let max = 0;
+    const reach = (p: Vec, pad = 0) => {
+      const d = Math.hypot(p.x - center.x, p.y - center.y) + pad;
+      // Non-finite geometry is draw()'s problem to warn about (checkFinite)
+      // — here it must simply not poison the answer with NaN.
+      if (Number.isFinite(d) && d > max) max = d;
+    };
+
+    for (const item of this.items) {
+      if (item.cfg.excludeFromExtent) continue;
+      if (resolveScalar(item.cfg.opacity ?? 1, f) <= 0.003) continue;
+      switch (item.kind) {
+        case 'sphere':
+          if (item.showRing) reach(item.centerAt(f), item.radiusAt(f));
+          if (item.showBody) reach(item.position(f));
+          break;
+        case 'anchor':
+          if ((item.cfg.marker ?? 'cross') !== 'none') reach(item.position(f));
+          break;
+        case 'connector':
+          reach(item.fromAt(f));
+          reach(item.toAt(f));
+          break;
+        case 'angle':
+          reach(item.vertexAt(f), item.radiusAt(f));
+          break;
+        case 'trail':
+          // points() are relative to the trail's own `relativeTo`, already
+          // recentred (see Trail.points) — put them back into the same
+          // world space `center` lives in before measuring.
+          for (const p of item.points(f)) reach({ x: p.x + ref.x, y: p.y + ref.y });
+          break;
+        default:
+          assertNever(item);
+      }
+    }
+    return max;
   }
 
   private checkFinite(id: string, ...points: Vec[]): boolean {

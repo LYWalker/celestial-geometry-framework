@@ -142,6 +142,7 @@
     Anchor,
     Angle,
     Connector,
+    describeSceneInto,
     distanceBetween,
     frame,
     Scene,
@@ -151,6 +152,7 @@
     nester,
     wireAnimationLoop,
     wireCamera,
+    wireResize,
     type BodyRenderer,
     type SceneTheme,
   } from '../canvas-diagram/scene';
@@ -406,7 +408,7 @@
       .add(apogeeLine)
       .add(elongation);
 
-    return { scene, earth, moon, outerRadius: rMars + 20 };
+    return { scene, earth, moon };
   }
 
   function init(root: HTMLElement) {
@@ -420,19 +422,14 @@
     const liveRegionEl = root.querySelector<HTMLElement>('[data-live-region]')!;
 
     const hover = new HoverController({ root: tipEl, text: tipText, sub: tipSub });
-    const { scene, earth, moon, outerRadius } = buildScene();
+    const { scene, earth, moon } = buildScene();
 
     // The screen-reader text alternative for the whole figure: every named
     // object's name and description, the same data the hover tooltip and
     // click-flash readout already surface visually (see Meta.description).
-    // Built straight from the Scene rather than kept as a second, parallel
-    // list, so it can never drift out of sync with what's actually declared.
-    for (const item of scene.all()) {
-      if (!item.name) continue;
-      const li = document.createElement('li');
-      li.textContent = item.cfg.description ? `${item.name}: ${item.cfg.description}` : item.name;
-      objectListEl.appendChild(li);
-    }
+    // Derived from the Scene rather than kept as a second, parallel list,
+    // so it can never drift out of sync with what's actually declared.
+    describeSceneInto(objectListEl, scene);
 
     const stage = new Stage({
       canvas,
@@ -443,7 +440,10 @@
         vignette: 'rgba(3,5,12,0.55)',
       },
       zodiac: {
-        radius: outerRadius,
+        // no radius: the ring sizes itself to whatever the scene reaches,
+        // plus `padding` — add an outer shell or widen Mars's orbit and it
+        // follows, instead of this figure keeping its own copy of the number
+        padding: 20,
         band: 22,
         segments: ZODIAC.map((name) => ({ name })),
         color: 'rgba(150,168,214,0.22)',
@@ -455,7 +455,10 @@
     let pointer: Vec | null = null;
 
     function resize() {
-      stage.resize({ fitRadius: outerRadius + 34 });
+      // the ring's own resolved outer radius — the same number drawZodiac
+      // will use this frame, rather than a second estimate of it
+      const outer = stage.zodiacGeometry(frame(clock()), scene)?.outer ?? 0;
+      stage.resize({ fitRadius: outer + 12 });
       draw();
     }
 
@@ -500,9 +503,11 @@
       }
     }
 
-    const ro = new ResizeObserver(resize);
-    ro.observe(stageEl);
-    resize();
+    // observes the element, calls resize() once now, and handles the case a
+    // hand-rolled ResizeObserver here used to get wrong: a figure that
+    // isn't laid out yet can't be measured, and simply gets resized again
+    // when it is
+    const unwireResize = wireResize(stageEl, resize);
 
     const unwireCamera = wireCamera({
       canvas,
@@ -538,7 +543,7 @@
 
     return () => {
       unwireLoop();
-      ro.disconnect();
+      unwireResize();
       unwireCamera();
       stage.destroy();
     };

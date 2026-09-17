@@ -230,6 +230,13 @@ export interface Meta {
   labelGap?: number;
   /** name this object at all. Default true. */
   showLabel?: boolean;
+  /** leave this object out of `Scene.extent()` — and so out of whatever
+   * sizes itself from it, an auto-sized zodiac ring above all. For the one
+   * shape that would otherwise chase its own tail: a sightline or shell
+   * drawn *out to* the ring, which every frame would measure as the
+   * furthest thing in the scene and push the ring further out again. It is
+   * still drawn, hovered and labelled exactly as before. */
+  excludeFromExtent?: boolean;
   /** draw order relative to other objects — lower first. Each object kind
    * has a sensible default on the same scale scene.ts's `LAYER` names
    * (shells 0, trails 5, anchors 8, connectors 10, angles 20, bodies 30);
