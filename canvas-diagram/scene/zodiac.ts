@@ -215,7 +215,7 @@ export class ZodiacRing {
       this.measuring = true;
       let measured: number;
       try {
-        measured = this.scene.extent(f, { center, ref: center });
+        measured = this.scene.extent(f, { center });
       } finally {
         this.measuring = false;
         // Anything resolved during the measurement saw `inner`/`outer` as 0

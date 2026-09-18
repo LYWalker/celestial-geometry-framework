@@ -62,6 +62,22 @@ export const LAYER = {
   body: 30,
 } as const;
 
+/**
+ * Where a Trail's points hang in world space: its own `relativeTo`, resolved
+ * at the current instant (the origin for a trail plotted in raw world
+ * space). Every sample is stored as `target(t) - relativeTo(t)` — a shape,
+ * not a place — so to draw it, or measure it, that shape is pinned back onto
+ * the point it was reduced against, as that point stands *now*. This is
+ * deliberately not the draw call's `ref`: the two coincide for the common
+ * case of a trail drawn in the frame the camera holds still, but the moment a
+ * figure follows something else (clicking a planet to centre on it), a ref
+ * that stood in for the anchor would slide the whole trail off the body it
+ * belongs to by the distance between them.
+ */
+function trailAnchor(item: Trail, f: Frame): Vec {
+  return item.cfg.relativeTo === undefined ? { x: 0, y: 0 } : resolvePoint(item.cfg.relativeTo, f);
+}
+
 function layerOf(item: SceneItem): number {
   if (item.cfg.layer !== undefined) return item.cfg.layer;
   switch (item.kind) {
@@ -273,19 +289,19 @@ export class Scene {
    * Stage's zodiac ring sizes itself with this (see `ZodiacConfig.radius`);
    * a figure can call it directly for its own `resize({ fitRadius })`.
    *
-   * `ref` is the point the draw call recentres on — needed only because a
-   * Trail's samples are stored already relative to it — and defaults to
-   * `center`, which is what a figure whose camera and zodiac share a centre
-   * wants. Returns 0 for an empty scene (or one with nothing visible).
+   * Returns 0 for an empty scene (or one with nothing visible). It takes no
+   * `ref`: a Trail's samples are put back into world space through the
+   * trail's own `relativeTo` (see the `trail` case below), which is the
+   * point they were reduced against in the first place — the draw call's
+   * recentring never enters into it.
    *
    * Resolved fresh per call, like everything else here: for a scene whose
    * outermost object *moves*, the answer moves with it. A caller that wants
    * a ring that doesn't breathe should size it from geometry that doesn't
    * either — a fixed outermost shell — or cache the value itself.
    */
-  extent(f: Frame, opts: { center?: PointLike; ref?: PointLike } = {}): number {
+  extent(f: Frame, opts: { center?: PointLike } = {}): number {
     const center = resolvePoint(opts.center ?? ORIGIN, f);
-    const ref = opts.ref === undefined ? center : resolvePoint(opts.ref, f);
     let max = 0;
     const reach = (p: Vec, pad = 0) => {
       const d = Math.hypot(p.x - center.x, p.y - center.y) + pad;
@@ -312,12 +328,15 @@ export class Scene {
         case 'angle':
           reach(item.vertexAt(f), item.radiusAt(f));
           break;
-        case 'trail':
+        case 'trail': {
           // points() are relative to the trail's own `relativeTo`, already
           // recentred (see Trail.points) — put them back into the same
-          // world space `center` lives in before measuring.
-          for (const p of item.points(f)) reach({ x: p.x + ref.x, y: p.y + ref.y });
+          // world space `center` lives in, through that same point resolved
+          // at the current instant, before measuring.
+          const anchor = trailAnchor(item, f);
+          for (const p of item.points(f)) reach({ x: p.x + anchor.x, y: p.y + anchor.y });
           break;
+        }
         case 'ringmarker':
           // Never measured, whatever it says about `excludeFromExtent`: a
           // reading sits *on* the ring, and an auto-sized ring is sized from
@@ -405,12 +424,15 @@ export class Scene {
     const ref = resolvePoint(opts.ref, f);
     const toScreen = (p: Vec) => worldToScreen(p, ref, camera);
     // A Trail's own points are already relative to *its* `relativeTo` (see
-    // trail.ts) — typically the same point as `ref`, just re-resolved at
-    // each sample's own past moment. Screen-mapping them through `ref`
-    // again, the way every other kind's raw world coordinates need, would
-    // subtract that point twice and drag the whole trail off by `ref`'s
-    // current value. Zero stands in for "no further recentring."
-    const toScreenRel = (p: Vec) => worldToScreen(p, { x: 0, y: 0 }, camera);
+    // trail.ts), re-resolved at each sample's own past moment. Screen-mapping
+    // them through `ref` the way every other kind's raw world coordinates
+    // need would subtract a point they've already had subtracted; instead
+    // they're pinned back onto their anchor as it stands now (trailAnchor)
+    // and mapped from there, which leaves them under `ref` exactly like
+    // everything else — including when `ref` is some *other* body the camera
+    // is following, where anchor and ref part company.
+    const toScreenTrail = (anchor: Vec) => (p: Vec) =>
+      worldToScreen({ x: p.x + anchor.x, y: p.y + anchor.y }, ref, camera);
     const labels: Label[] = [];
     const pendingBodies: (() => void)[] = [];
     // Screen-space furniture that has to wait for the camera transform to be
@@ -755,17 +777,20 @@ export class Scene {
 
           case 'trail': {
             const color = item.cfg.color ?? theme.trail;
-            // Undo the ambient `-ref` this pass otherwise applies to every
-            // item — the trail's own points already carry that subtraction,
-            // done per-sample against each sample's own past moment (see
-            // toScreenRel above and trail.ts's pushSample).
+            const anchor = trailAnchor(item, f);
+            // Hang the trail's stored shape off its anchor's position now,
+            // inside the ambient `-ref` this pass applies to every item —
+            // the per-sample subtraction it already carries was done against
+            // each sample's own past moment, which is a different thing (see
+            // toScreenTrail above and trail.ts's pushSample).
             ctx.save();
-            ctx.translate(ref.x, ref.y);
+            ctx.translate(anchor.x, anchor.y);
             item.draw(ctx, f, camera.zoom, opacity * ambientAlpha, color);
             ctx.restore();
             if (hover) {
               const pts = item.points(f);
               if (pts.length > 1) {
+                const toScreenRel = toScreenTrail(anchor);
                 // A hover hit-test needs far fewer points than a smooth
                 // curve does — every ~1/24th of the trail is plenty to
                 // find "the pointer is near this line" within threshold.

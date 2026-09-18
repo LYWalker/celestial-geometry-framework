@@ -4,8 +4,11 @@ import { Scene, type SceneTheme } from '../canvas-diagram/scene/scene.js';
 import { Sphere } from '../canvas-diagram/scene/sphere.js';
 import { Anchor } from '../canvas-diagram/scene/anchor.js';
 import { Connector } from '../canvas-diagram/scene/connector.js';
+import { Trail } from '../canvas-diagram/scene/trail.js';
 import { frame } from '../canvas-diagram/scene/types.js';
 import type { Camera } from '../canvas-diagram/camera.js';
+import type { Vec } from '../canvas-diagram/geometry.js';
+import type { HoverController } from '../canvas-diagram/hover.js';
 import { makeFakeCtx } from './helpers/fakeCtx.js';
 import { near } from './helpers/near.js';
 
@@ -138,5 +141,85 @@ describe('Scene.extent (what an auto-sized zodiac ring measures)', () => {
 
   test('an empty scene reaches nowhere', () => {
     assert.equal(new Scene().extent(frame(0)), 0);
+  });
+});
+
+describe('Scene trail anchoring (regression: a followed body left its trail behind)', () => {
+  /** A stand-in HoverController that only records what got marked — enough
+   * to read back where the trail's points actually landed on screen, which
+   * is the whole question here. */
+  function recordingHover(): { ctrl: HoverController; marks: Map<string, Vec[]> } {
+    const marks = new Map<string, Vec[]>();
+    const ctrl = {
+      begin: () => undefined,
+      mark: (pts: Vec[], _t: string, _s: string, _c: string, id?: string) => {
+        if (id) marks.set(id, pts);
+        return false;
+      },
+      markCircle: () => false,
+    } as unknown as HoverController;
+    return { ctrl, marks };
+  }
+
+  /** Earth at the origin; a planet on a ring about it; a trail of the
+   * planet's own past, plotted relative to the earth — the orrery's shape,
+   * in miniature. `angle` moves with the clock so the trail has somewhere
+   * to have been. */
+  function build() {
+    const earth = new Anchor({ id: 'te', name: 'Earth', marker: 'none' });
+    const planet = new Sphere({
+      id: 'tp',
+      name: 'Planet',
+      center: earth,
+      radius: 100,
+      angle: (f) => f.t * 90,
+      showRing: false,
+    });
+    const trail = new Trail({
+      id: 'tt',
+      name: 'Trail',
+      target: planet,
+      relativeTo: earth,
+      span: 1,
+      step: 0.25,
+      dependsOn: [],
+    });
+    return { earth, planet, trail, scene: new Scene().add(earth).add(planet).add(trail) };
+  }
+
+  test('the trail ends on the body it trails, even when the camera follows that body', () => {
+    const { planet, scene } = build();
+    const f = frame(2);
+    const { ctrl, marks } = recordingHover();
+
+    // ref = the planet: what Selection.ref() returns once you click it.
+    scene.draw({ ctx: makeFakeCtx(), f, ref: planet, camera: makeCamera(), theme: THEME, hover: ctrl });
+
+    const pts = marks.get('tt:trail');
+    assert.ok(pts && pts.length > 1, 'expected the trail to register a hover zone');
+    const end = pts![pts!.length - 1]!;
+    // The followed body sits at the camera's centre (cx/cy/pan all 0), and
+    // the trail's newest sample *is* that body — so it must land there too.
+    assert.ok(near(end.x, 0) && near(end.y, 0), `trail ended at ${end.x},${end.y}, not on the body it trails`);
+  });
+
+  test('following nothing in particular is unchanged: the trail still ends on its body', () => {
+    const { earth, planet, scene } = build();
+    const f = frame(2);
+    const { ctrl, marks } = recordingHover();
+
+    scene.draw({ ctx: makeFakeCtx(), f, ref: earth, camera: makeCamera(), theme: THEME, hover: ctrl });
+
+    const pts = marks.get('tt:trail')!;
+    const end = pts[pts.length - 1]!;
+    const p = planet.position(f);
+    assert.ok(near(end.x, p.x) && near(end.y, p.y), `trail ended at ${end.x},${end.y}, not at ${p.x},${p.y}`);
+  });
+
+  test('extent measures a trail from its own anchor, with no ref to be told', () => {
+    const { scene } = build();
+    // The planet's ring is 100 from the earth and the trail rides it, so
+    // the scene reaches exactly 100 — whatever the camera is holding still.
+    assert.ok(near(scene.extent(frame(2)), 100));
   });
 });
