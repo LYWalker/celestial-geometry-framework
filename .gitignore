@@ -4,3 +4,7 @@ dist/
 # npm test's own scratch build (see tsconfig.test.json) — compiled output,
 # not source, and safe to delete any time.
 .test-out/
+
+# the emit-check harness's scratch output (see test/emit-check.mjs) — emitted
+# figures and the tsconfig used to compile them, deleted when it passes.
+.emit-check/

@@ -1,0 +1,104 @@
+---
+/**
+ * The diagram editor, mounted.
+ *
+ * Everything it is lives in `canvas-diagram/editor/`, framework-agnostic and
+ * dependency-free; this component is the four lines it takes to give it an
+ * element and a size. A host that is not Astro calls `mountEditor` itself and
+ * needs none of this.
+ *
+ * `helpers` is the seam that matters. The editor's expressions can reach the
+ * kit's own geometry without being told, but a project's figures are usually
+ * about something — an ephemeris, a table, a set of constants — and those are
+ * the project's, not the kit's. Passing them in by name here is what lets
+ * `{ expr: 'rambam.moon(f.t).true' }` work in the editor and emit as exactly
+ * that call against a real import. The page that mounts this decides what
+ * goes in scope, and the editor never has to know what a Rambam is.
+ */
+
+interface Props {
+  /** how tall the editor is. It fills its host, so this has to be a length. */
+  height?: string;
+}
+
+const { height = 'calc(100vh - 6rem)' } = Astro.props;
+---
+
+<div class="diagram-editor" data-diagram-editor style={`height: ${height}`}></div>
+
+<style>
+  .diagram-editor {
+    width: 100%;
+    border: 1px solid rgba(150, 168, 214, 0.22);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+</style>
+
+<script>
+  import { mountEditor, parseDoc, EXAMPLES, type DiagramDoc, type EditorHandle } from '../canvas-diagram/editor';
+
+  /**
+   * Names this project's figures are written in terms of, put in scope for
+   * every expression in the editor.
+   *
+   * Imported as a namespace rather than field by field so that an expression
+   * reads `rambam.rambamMoon(f.t).true` — one name in scope, and the emitted
+   * source imports the same namespace. Adding a function to `src/lib/rambam`
+   * makes it available in the editor with nothing to change here.
+   */
+  import * as rambam from '../../src/lib/rambam';
+
+  /** Where the editor last was, so a reload does not cost the figure. An
+   * authoring tool that forgets your work when the dev server restarts is one
+   * you stop trusting with anything you care about. */
+  const SAVE_KEY = 'celestial-diagram-editor:draft';
+
+  const handles = new Map<HTMLElement, EditorHandle>();
+
+  function boot(): void {
+    for (const handle of handles.values()) handle.destroy();
+    handles.clear();
+
+    for (const root of document.querySelectorAll<HTMLElement>('[data-diagram-editor]')) {
+      let saved: DiagramDoc | undefined;
+      try {
+        const text = localStorage.getItem(SAVE_KEY);
+        if (text) {
+          const result = parseDoc(text);
+          if (!('error' in result)) saved = result.doc;
+        }
+      } catch {
+        // a private window, or a draft written by an older format — either way
+        // the right answer is to open the examples instead of failing to open
+      }
+
+      handles.set(
+        root,
+        mountEditor(root, {
+          ...(saved ? { doc: saved } : {}),
+          examples: EXAMPLES,
+          helpers: { rambam },
+          emit: {
+            // these figures live beside the kit rather than installing it
+            from: '../canvas-diagram',
+            rendererImport: '../canvas-diagram/editor',
+          },
+          onChange: (doc) => {
+            try {
+              localStorage.setItem(SAVE_KEY, JSON.stringify(doc));
+            } catch {
+              // out of quota, or blocked: not worth interrupting the edit over
+            }
+          },
+        }),
+      );
+    }
+  }
+
+  document.addEventListener('astro:page-load', boot);
+  document.addEventListener('astro:before-swap', () => {
+    for (const handle of handles.values()) handle.destroy();
+    handles.clear();
+  });
+</script>

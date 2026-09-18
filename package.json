@@ -10,11 +10,13 @@
   "exports": {
     ".": "./canvas-diagram/index.ts",
     "./scene": "./canvas-diagram/scene/index.ts",
-    "./three": "./canvas-diagram/three/index.ts"
+    "./three": "./canvas-diagram/three/index.ts",
+    "./editor": "./canvas-diagram/editor/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
-    "test": "tsc -p tsconfig.test.json && node --test \".test-out/test/*.test.js\""
+    "test": "tsc -p tsconfig.test.json && node --test \".test-out/test/*.test.js\"",
+    "emit-check": "tsc -p tsconfig.test.json && node test/emit-check.mjs"
   },
   "peerDependencies": {
     "three": ">=0.160.0"

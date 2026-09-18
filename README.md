@@ -19,7 +19,7 @@ own for a non-bundled environment, compile the source with your own
 `tsconfig.json` (see the one at the repo root for the settings this codebase
 itself expects: strict, `target ES2022`, `moduleResolution bundler`).
 
-There are two entry points:
+There are three entry points:
 
 ```ts
 // the geometry/camera/annotate/labels/hover primitives, AND the scene layer
@@ -29,6 +29,10 @@ import { Scene, Stage, Sphere, Anchor, wireCamera } from 'celestial-geometry-fra
 
 // just the scene layer, if you want the subpath explicit
 import { Scene, Stage, Sphere, Anchor, wireCamera } from 'celestial-geometry-framework/scene';
+
+// the editor: build a figure by placing and adjusting it, then emit it as
+// ordinary TypeScript. See "The editor" below.
+import { mountEditor } from 'celestial-geometry-framework/editor';
 ```
 
 The primitives (`geometry.ts`, `camera.ts`, `annotate.ts`, `labels.ts`,
@@ -200,6 +204,102 @@ reproduces, in miniature, the constructions `Orrery.astro` built by hand —
 nested shells, the sun's eccentric circle, the moon's epicycle measured from
 the earth, a fading trail, a custom lit-body renderer — with no
 trigonometry anywhere in its script. Start there when building a new figure.
+
+## The editor
+
+`canvas-diagram/editor/` is an authoring tool for these figures: place objects
+by clicking, adjust them by dragging or by typing into a panel that explains
+each field as you use it, then take the result away as ordinary TypeScript.
+
+```ts
+import { mountEditor, EXAMPLES } from 'celestial-geometry-framework/editor';
+
+mountEditor(document.querySelector('#editor')!, {
+  examples: EXAMPLES,
+  // names this project's own figures are written in terms of; expressions can
+  // then say `rambam.rambamMoon(f.t).true`, and emit as exactly that call
+  helpers: { rambam },
+});
+```
+
+`components/DiagramEditor.astro` is that call plus an element to put it in, and
+`/dev/diagram-editor` is the page it runs on in this repo.
+
+### It is three layers, and only the top one is a UI
+
+- **`doc.ts` — the document.** The serialisable form of a figure: plain JSON, no
+  closures, no object identity. Every field the scene layer types as "a number
+  *or* a function of the frame" is typed here as "a number *or* a source
+  string" (`{ expr: 'f.t * 22' }`), and every reference between objects is an
+  `id` rather than an object. That is the whole difference.
+- **`compile.ts` / `emit.ts` — the round trip.** A document compiles to live
+  `Scene` objects, and emits as the source a hand-written figure would have
+  been. Neither is the editor's private business: a build step can compile
+  documents, and a script can emit them.
+- **`editor.ts` — the UI** over the two.
+
+### What makes the preview trustworthy
+
+Every edit replaces the whole document, recompiles the whole figure, and
+redraws. There is no incremental update path anywhere, which is deliberate: the
+hardest bug in a tool like this is the preview quietly disagreeing with the
+document because one field had an update path and another didn't. If the only
+path is "recompile", there is nothing to be inconsistent with. It also makes
+undo a copy per edit rather than a set of inverse operations to get subtly
+wrong.
+
+The same reasoning runs the other way for the emitter. `npm run emit-check`
+emits every worked example both ways and compiles the result under this repo's
+own `tsconfig.json` — strict, `exactOptionalPropertyTypes`,
+`noUncheckedIndexedAccess`, `noUnusedLocals` and all. A figure that leaves the
+editor is source, and source that does not compile is not an export.
+
+### Expressions
+
+Anything the scene layer lets vary with the frame gets an *ƒx* toggle in the
+panel, and becomes a snippet evaluated with the frame in scope as `f`. In scope
+besides `f`: the kit's own geometry (`polar`, `norm360`, `distanceBetween`, …),
+three blending helpers (`lerp`, `ease`, `wrap180`), every object in the figure
+under the same name the emitted source will give it (`moonDeferent.centerAt(f)`
+works, and means what it looks like), the ring (`ringRadius(f)`,
+`ringOuter(f)`), and whatever the host registered through `helpers`.
+
+Evaluating source text is a real decision, so it is worth being plain about
+what it is and is not. This is an authoring tool: the text being evaluated is
+the text its author typed a keystroke earlier, in their own browser, and the
+emitted file contains the same text compiled by their own build. There is no
+trust boundary between the typist and the evaluator. There *is* a fragility
+boundary, and that is what `expr.ts` is built around — compile once per source
+string, catch, report, latch the failure, and keep drawing, so a half-typed
+expression never takes the figure off the screen.
+
+### Parameters
+
+A figure's expressions can read named amounts besides the clock — `f.shells`,
+`f.corrected`. Declaring one in the Figure panel is the whole of what it takes:
+it gets a slider here, a slider in the emitted component, and a key in the
+emitted `frame()` call. This is how a figure gets a mode it can fade between.
+
+Because `Frame` carries those through an index signature, `f.shells` reads as
+`number | undefined` under `noUncheckedIndexedAccess`. The kit's hand-written
+figures answer that with a cast at each use; the emitter declares the figure's
+own frame interface and one wrapper, so the expression in the emitted file is
+character-for-character the expression in the document — which is what lets one
+be read against the other, and pasted back.
+
+### The baseline
+
+`canvas-diagram/editor/examples/` holds three figures as documents, and they
+are the tool's own measure rather than decoration. Between them they use every
+field of every kind the scene layer has: nested and eccentric circles, an
+epicycle, an angle measured from somewhere that is not a circle's own centre, a
+tilted plane, trails, sightlines of both kinds, readings on the ring sighted
+from two different points, named body renderers, a self-sizing ring with
+constellations, and parameters that fade one model into another. `npm test`
+compiles each of them, checks that nothing goes wrong and that every object
+lands somewhere real at four different moments; `npm run emit-check` compiles
+what they emit. If something in the kit cannot be said in a document, that is
+the gap those examples exist to find.
 
 ## `Orrery.astro` vs `OrreryFw.astro`: a deliberate benchmark
 
