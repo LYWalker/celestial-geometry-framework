@@ -13,11 +13,13 @@ import { DEG, FULL_CIRCLE, type Box, type Vec } from '../geometry.js';
 import { panBy, pinchAt, worldToScreen, zoomAt, type Camera } from '../camera.js';
 import { drawLabels as drawLabelsKit, type Label, type LabelTheme } from '../labels.js';
 import type { HoverController } from '../hover.js';
+import type { ConstellationFigure } from './constellations.js';
 import type { Scene, SceneTheme } from './scene.js';
 import {
   type ZodiacSegment,
   CONSTELLATION_LINE_COLOR,
   CONSTELLATION_NOTE,
+  CONSTELLATION_SKY_NOTE,
   CONSTELLATION_STAR_COLOR,
   DEFAULT_LATITUDE_GAIN_LIMIT,
   DEFAULT_LATITUDE_SPAN,
@@ -628,9 +630,22 @@ export class Stage {
     const starColor = con.starColor ?? CONSTELLATION_STAR_COLOR;
     const lineColor = con.color ?? CONSTELLATION_LINE_COLOR;
 
-    for (const fig of con.figures) {
-      const pts = fig.stars.map(([lon, lat]) => view.at(lon + shift, radiusAt(lat)));
-      if (!pts.some((p) => view.onScreen(p, 60))) continue;
+    // a figure's own middle, as a direction rather than an average: Pisces
+    // straddles 0° and would otherwise come out at 180°
+    const middleOf = (fig: ConstellationFigure): number => {
+      let sx = 0;
+      let sy = 0;
+      for (const [lon] of fig.stars) {
+        sx += Math.cos(lon * DEG);
+        sy += Math.sin(lon * DEG);
+      }
+      return Math.atan2(sy, sx) / DEG;
+    };
+
+    con.figures.forEach((fig, index) => {
+      const offset = shift + ring.signOffset(index, middleOf(fig));
+      const pts = fig.stars.map(([lon, lat]) => view.at(lon + offset, radiusAt(lat)));
+      if (!pts.some((p) => view.onScreen(p, 60))) return;
 
       // The art keeps the names' alpha, not the ring lines': a ring dimmed
       // to a quarter in the outer views still reads as a circle, while
@@ -703,19 +718,12 @@ export class Stage {
         });
       }
 
-      // the figure's own name, out at the rim, where it can be read against
-      // the sign name sitting further in — which is the whole point of
-      // drawing the two on one ring
-      if (con.labels ?? true) {
-        // a mean direction, not a mean number: Pisces straddles 0°
-        let sx = 0;
-        let sy = 0;
-        for (const [lon] of fig.stars) {
-          sx += Math.cos(lon * DEG);
-          sy += Math.sin(lon * DEG);
-        }
-        const meanLon = Math.atan2(sy, sx) / DEG + shift;
-        const p = view.at(meanLon, view.R2 + artBand + 9);
+      // The figure's own name, out at the rim, where it can be read against
+      // the sign name sitting further in — which is the point of drawing
+      // both when the two have come apart, and pure repetition when the
+      // figure has been carried into its own sign's arc.
+      if (con.labels ?? !ring.alignsToSigns()) {
+        const p = view.at(middleOf(fig) + offset, view.R2 + artBand + 9);
         if (view.onScreen(p, 0)) {
           ctx.globalAlpha = view.labelAlpha * 0.85;
           ctx.fillStyle = lineColor;
@@ -734,11 +742,11 @@ export class Stage {
         this.zodiacZones.push({
           id: `constellation:${fig.code}`,
           text: `${fig.name} · ${fig.nameHe}`,
-          sub: con.note ?? CONSTELLATION_NOTE,
+          sub: con.note ?? (ring.alignsToSigns() ? CONSTELLATION_NOTE : CONSTELLATION_SKY_NOTE),
           color: starColor,
           pts: shown,
         });
-    }
+    });
     ctx.globalAlpha = view.alpha;
   }
 

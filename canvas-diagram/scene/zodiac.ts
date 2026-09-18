@@ -56,6 +56,23 @@ export interface ZodiacSegment {
 export interface ZodiacConstellations {
   /** the figures to draw — ZODIAC_FIGURES, for the usual twelve */
   figures: readonly ConstellationFigure[];
+  /**
+   * Where each figure is drawn round the ring.
+   *
+   * - `'sign'` (the default) — in the arc of the sign it shares a name
+   *   with: each figure is carried bodily round until its own middle is the
+   *   middle of its segment. This is the ring as an emblem — here is Leo,
+   *   and this is the lion it is named for — and it is what someone reading
+   *   a dial wants, because the picture and the word agree.
+   * - `'sky'` — at the stars' own longitudes, `lonOffset` and all. Then the
+   *   figures do *not* sit under their names, because the signs are counted
+   *   from the equinox and the equinox has crept back most of a sign since
+   *   the two were named together. True, and a different point to make.
+   *
+   * `'sign'` needs one figure per segment, in the same order; anything else
+   * falls back to `'sky'`, there being no segment to belong to.
+   */
+  align?: 'sign' | 'sky';
   /** radial room for the art, world px, outside the band of names.
    * Default: twice the name band. */
   band?: number;
@@ -91,13 +108,18 @@ export interface ZodiacConstellations {
   /** degrees added to every star's J2000 longitude. Pass
    * `(f) => PRECESSION_DEG_PER_DAY * daysSinceJ2000(f.t)` for a figure with
    * a clock on it, and the stars drift against the signs as it runs.
-   * Default 0 — the stars where they stood in 2000. */
+   * Default 0 — the stars where they stood in 2000. Ignored under
+   * `align: 'sign'`, where each figure is placed by its segment rather than
+   * by its longitude and there is nothing for precession to move. */
   lonOffset?: Scalar;
   /** the lines joining the stars */
   color?: string;
   /** the stars */
   starColor?: string;
-  /** name each figure, out at the rim. Default true. */
+  /** Name each figure, out at the rim. Defaults to true under
+   * `align: 'sky'`, where a figure has drifted away from its own name and
+   * needs one of its own, and false under `align: 'sign'`, where the name
+   * is already written in the band directly beneath it. */
   labels?: boolean;
   /**
    * Draw them at all. Default true. This is config rather than a draw-time
@@ -188,7 +210,13 @@ export const ZODIAC_NOTE =
 /** What a constellation figure says about itself: why it is not sitting
  * over the sign that bears its name. */
 export const CONSTELLATION_NOTE =
-  'The stars themselves. They no longer stand over the sign named after them: the signs are counted from the equinox, which creeps back about a degree every seventy-two years.';
+  'The stars themselves, drawn in the arc of the sign named after them. In the sky they have slipped most of a sign away from it since the two were named together: the signs are counted from the equinox, which creeps back about a degree every seventy-two years.';
+
+/** What a figure says about itself when it is drawn at its own longitude
+ * rather than in its sign's arc — where the drift is on the page and does
+ * not have to be described. */
+export const CONSTELLATION_SKY_NOTE =
+  'The stars themselves, at their own longitudes — which is why this figure is not sitting over the sign named after it. The signs are counted from the equinox, and the equinox creeps back about a degree every seventy-two years.';
 
 /** The ring's own lines, when the config doesn't say. Faint, but not so
  * faint that a dimmed ring disappears: it is a backdrop that still has to
@@ -418,10 +446,33 @@ export class ZodiacRing {
     return this.cfg.constellations ? (this.cfg.constellations.latitudeSpan ?? DEFAULT_LATITUDE_SPAN) : 0;
   }
 
-  /** The precession offset to apply to the stars this frame, in degrees. */
+  /** The precession offset to apply to the stars this frame, in degrees —
+   * zero when the figures are placed by their signs rather than by the sky
+   * (see `ZodiacConstellations.align`). */
   lonOffset(f: Frame): number {
     const c = this.cfg.constellations;
-    return c && c.lonOffset !== undefined ? resolveScalar(c.lonOffset, f) : 0;
+    if (!c || c.lonOffset === undefined || this.alignsToSigns()) return 0;
+    return resolveScalar(c.lonOffset, f);
+  }
+
+  /** Whether the figures are being carried into their signs' arcs. False
+   * when there isn't one figure per segment to carry. */
+  alignsToSigns(): boolean {
+    const c = this.cfg.constellations;
+    if (!c || (c.align ?? 'sign') !== 'sign') return false;
+    return c.figures.length === this.cfg.segments.length;
+  }
+
+  /**
+   * How far a figure has to be carried to sit in the middle of its own
+   * segment, in degrees — 0 when the figures are drawn at their own
+   * longitudes. `meanLon` is the figure's own middle, as a direction rather
+   * than an average (Pisces straddles 0°).
+   */
+  signOffset(index: number, meanLon: number): number {
+    if (!this.alignsToSigns()) return 0;
+    const n = this.cfg.segments.length;
+    return ((index + 0.5) * 360) / n - meanLon;
   }
 
   /**
