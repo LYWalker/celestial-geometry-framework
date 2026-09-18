@@ -14,7 +14,19 @@ import { panBy, pinchAt, worldToScreen, zoomAt, type Camera } from '../camera.js
 import { drawLabels as drawLabelsKit, type Label, type LabelTheme } from '../labels.js';
 import type { HoverController } from '../hover.js';
 import type { Scene, SceneTheme } from './scene.js';
-import { ZodiacRing, type ZodiacConfig, type ZodiacGeometry } from './zodiac.js';
+import {
+  type ZodiacSegment,
+  CONSTELLATION_LINE_COLOR,
+  CONSTELLATION_NOTE,
+  CONSTELLATION_STAR_COLOR,
+  DEFAULT_LATITUDE_SPAN,
+  ZODIAC_COLOR,
+  ZODIAC_LABEL_COLOR,
+  ZODIAC_NOTE,
+  ZodiacRing,
+  type ZodiacConfig,
+  type ZodiacGeometry,
+} from './zodiac.js';
 import { resolvePoint, type Frame, type PointLike } from './types.js';
 
 export interface BackgroundTheme {
@@ -131,6 +143,11 @@ export class Stage {
 
   private stars: Star[] = [];
   private zodiacBoxes: Box[] = [];
+  /** what the most recent drawZodiac() found to be hoverable, in screen
+   * space - handed to the HoverController by markZodiacHover() rather than
+   * marked as they are drawn, because Scene.draw() calls hover.begin() and
+   * would throw away anything registered before it */
+  private zodiacZones: ZodiacZone[] = [];
   /** the ring itself — the figure's own ZodiacRing when it built one (so
    * `ring.outer` and what's drawn are the same object), otherwise one
    * wrapped around the plain config it was given */
@@ -172,7 +189,14 @@ export class Stage {
    * gets a size, a tab-shown handler, and so on) rather than silently
    * rendering a blank figure with no signal anything went wrong.
    */
-  resize(opts: { top?: number; bottom?: number; fitRadius?: number; obstacles?: HTMLElement[] } = {}): boolean {
+  resize(
+    opts: {
+      top?: number;
+      bottom?: number;
+      fitRadius?: number;
+      obstacles?: HTMLElement[];
+    } = {},
+  ): boolean {
     const canvas = this.cfg.canvas;
     const rect = canvas.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return false;
@@ -199,7 +223,12 @@ export class Stage {
     this.obstacles = (opts.obstacles ?? [])
       .map((el) => {
         const r = el.getBoundingClientRect();
-        return { x: r.left - rect.left, y: r.top - rect.top, w: r.width, h: r.height };
+        return {
+          x: r.left - rect.left,
+          y: r.top - rect.top,
+          w: r.width,
+          h: r.height,
+        };
       })
       .filter((b) => b.w > 0 && b.h > 0);
 
@@ -344,7 +373,10 @@ export class Stage {
       // touched anywhere else.
       const depth = STAR_DEPTHS[s.depthIndex]!;
       const k = kByDepth[s.depthIndex]!;
-      const p = { x: cam.cx + cam.pan.x * depth + s.x * k, y: cam.cy + cam.pan.y * depth + s.y * k };
+      const p = {
+        x: cam.cx + cam.pan.x * depth + s.x * k,
+        y: cam.cy + cam.pan.y * depth + s.y * k,
+      };
       if (p.x < -4 || p.x > w + 4 || p.y < -4 || p.y > h + 4) continue;
       const a = s.a * (STARFIELD.twinkleBase + STARFIELD.twinkleDepth * Math.sin(t * STARFIELD.twinkleRate + s.tw));
       if (s.bright) {
@@ -396,9 +428,18 @@ export class Stage {
   drawZodiac(
     f: Frame,
     ref: Vec,
-    opts: { alpha?: number | undefined; labels?: boolean | undefined; scene?: Scene | undefined } = {},
+    opts: {
+      alpha?: number | undefined;
+      labels?: boolean | undefined;
+      /** the names' own alpha, when they shouldn't fade with the ring's
+       * lines. A ring dimmed to a quarter still reads as a ring; its names,
+       * dimmed to a quarter, are gone. Defaults to `alpha`. */
+      labelAlpha?: number | undefined;
+      scene?: Scene | undefined;
+    } = {},
   ): Box[] {
     this.zodiacBoxes = [];
+    this.zodiacZones = [];
     const ring = this.ring;
     if (!ring) return [];
     const z = ring.cfg;
@@ -407,6 +448,7 @@ export class Stage {
     const ctx = this.ctx;
     const cam = this.camera;
     const alpha = opts.alpha ?? 1;
+    const labelAlpha = opts.labelAlpha ?? alpha;
     const centerScreen = worldToScreen(geom.center, ref, cam);
     const cx = centerScreen.x;
     const cy = centerScreen.y;
@@ -416,7 +458,16 @@ export class Stage {
     if (R2 > Math.hypot(this.w, this.h) * 3) return [];
 
     const n = z.segments.length;
-    const color = z.color ?? 'rgba(150,168,214,0.2)';
+    const color = z.color ?? ZODIAC_COLOR;
+    const note = z.note ?? ZODIAC_NOTE;
+    const he = z.language === 'he';
+    /** a point at this longitude and screen radius */
+    const at = (lon: number, r: number): Vec => ({
+      x: cx + r * Math.cos(lon * DEG),
+      y: cy - r * Math.sin(lon * DEG),
+    });
+    const onScreen = (p: Vec, pad = 40) => p.x > -pad && p.x < this.w + pad && p.y > -pad && p.y < this.h + pad;
+
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.strokeStyle = color;
@@ -436,25 +487,202 @@ export class Stage {
       ctx.stroke();
     }
 
+    if (z.constellations && geom.artBand > 0)
+      this.drawConstellations(f, geom, {
+        cx,
+        cy,
+        R2,
+        alpha,
+        labelAlpha,
+        at,
+        onScreen,
+      });
+
+    const Rl = (R + R2) / 2;
     if (opts.labels ?? true) {
-      const Rl = (R + R2) / 2;
+      ctx.globalAlpha = labelAlpha;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = z.labelColor ?? color;
-      ctx.font = (z.font ?? { css: '600 9.5px system-ui, sans-serif', px: 9.5 }).css;
+      ctx.fillStyle = z.labelColor ?? ZODIAC_LABEL_COLOR;
+      const face = (he ? (z.fontHe ?? z.font) : z.font) ?? {
+        css: '600 9.5px system-ui, sans-serif',
+        px: 9.5,
+      };
+      ctx.font = face.css;
+      // A name wider than its own segment runs into its neighbour's — at a
+      // small size SAGITTARIUS and CAPRICORN meet and read as one word. The
+      // first three letters are what an astronomer would have written
+      // anyway; the test is over all twelve rather than each in turn, so
+      // the ring never mixes the two forms and reads as an accident.
+      const nameOf = (seg: ZodiacSegment) => (he ? (seg.nameHe ?? seg.name) : seg.name.toUpperCase());
+      const arc = ((2 * Math.PI * Rl) / n) * 0.92;
+      const abbreviate = z.segments.some((seg) => ctx.measureText(nameOf(seg)).width > arc);
       for (let i = 0; i < n; i++) {
         const a = ((i + 0.5) * 360) / n;
-        const p = { x: cx + Rl * Math.cos(a * DEG), y: cy - Rl * Math.sin(a * DEG) };
+        const p = at(a, Rl);
         if (p.x < -50 || p.x > this.w + 50 || p.y < -20 || p.y > this.h + 20) continue;
         // i < n === z.segments.length, so this index is always in range.
-        const name = z.segments[i]!.name.toUpperCase();
+        const seg = z.segments[i]!;
+        // Hebrew has no upper case to shift into; applying a Latin face's
+        // own idea of one to it is at best a no-op and at worst mojibake.
+        const full = nameOf(seg);
+        const name = abbreviate ? full.slice(0, 3) : full;
         ctx.fillText(name, p.x, p.y);
         const w = ctx.measureText(name).width;
         this.zodiacBoxes.push({ x: p.x - w / 2, y: p.y - 6, w, h: 12 });
       }
+      ctx.globalAlpha = alpha;
     }
+
+    // One hover zone per segment, whether or not its name is drawn. A drawn
+    // zodiac is the piece of a figure a reader is least likely to have been
+    // told anything about, and the piece most worth saying something about:
+    // that it is not where it is drawn, and never could be.
+    if (alpha > 0.02) {
+      for (let i = 0; i < n; i++) {
+        const seg = z.segments[i]!;
+        const from = (i * 360) / n;
+        const pts: Vec[] = [];
+        for (let k = 0; k <= 10; k++) pts.push(at(from + (k * 360) / n / 10, Rl));
+        if (!pts.some((p) => onScreen(p))) continue;
+        const both = seg.nameHe ? (he ? `${seg.nameHe} · ${seg.name}` : `${seg.name} · ${seg.nameHe}`) : seg.name;
+        this.zodiacZones.push({
+          id: `zodiac:${i}`,
+          text: both,
+          sub: seg.description ?? note,
+          color: z.labelColor ?? ZODIAC_LABEL_COLOR,
+          pts,
+        });
+      }
+    }
+
     ctx.restore();
     return this.zodiacBoxes;
+  }
+
+  /**
+   * The stars, in a band of their own outside the names. Longitude is the
+   * angle round the ring exactly as it is for everything else; latitude is
+   * squashed into whatever radial room `artBand` gives, north outward, and
+   * clamped at the edge rather than dropped — a figure that reaches further
+   * off the ecliptic than the band does (Scorpius' sting, the Hyades)
+   * should still finish its own shape.
+   *
+   * Star sizes and line widths are screen px, not world px: like the
+   * segment names, this is annotation drawn *on* the figure rather than
+   * part of its geometry, and it should stay legible at whatever zoom the
+   * ring is being read at.
+   */
+  private drawConstellations(
+    f: Frame,
+    geom: ZodiacGeometry,
+    view: {
+      cx: number;
+      cy: number;
+      R2: number;
+      alpha: number;
+      labelAlpha: number;
+      at: (lon: number, r: number) => Vec;
+      onScreen: (p: Vec, pad?: number) => boolean;
+    },
+  ): void {
+    const ring = this.ring;
+    const con = ring?.cfg.constellations;
+    if (!ring || !con) return;
+    const ctx = this.ctx;
+    const artBand = geom.artBand * this.camera.zoom;
+    const mid = view.R2 + artBand / 2;
+    // 0.92, so a star pinned at the latitude limit still sits inside the
+    // band rather than exactly on the line the eye reads as its edge
+    const half = (artBand / 2) * 0.92;
+    const span = con.latitudeSpan ?? DEFAULT_LATITUDE_SPAN;
+    const shift = ring.lonOffset(f);
+    const starColor = con.starColor ?? CONSTELLATION_STAR_COLOR;
+    const lineColor = con.color ?? CONSTELLATION_LINE_COLOR;
+
+    for (const fig of con.figures) {
+      const pts = fig.stars.map(([lon, lat]) =>
+        view.at(lon + shift, mid + Math.max(-1, Math.min(1, lat / span)) * half),
+      );
+      if (!pts.some((p) => view.onScreen(p, 60))) continue;
+
+      // The art keeps the names' alpha, not the ring lines': a ring dimmed
+      // to a quarter in the outer views still reads as a circle, while
+      // stars dimmed to a quarter are simply not there.
+      ctx.globalAlpha = view.labelAlpha * 0.85;
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = 1;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      for (const path of fig.paths)
+        path.forEach((si, k) => {
+          const p = pts[si]!;
+          if (k === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        });
+      ctx.stroke();
+
+      ctx.fillStyle = starColor;
+      fig.stars.forEach(([, , mag], i) => {
+        const p = pts[i]!;
+        // first magnitude reads at ~2.2px and fifth at ~0.8px: what makes a
+        // pattern recognisable is the bright stars standing out from the
+        // rest, not how big any of them is
+        const r = Math.max(0.8, 2.6 - 0.4 * mag);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, FULL_CIRCLE);
+        ctx.fill();
+      });
+
+      // the figure's own name, out at the rim, where it can be read against
+      // the sign name sitting further in — which is the whole point of
+      // drawing the two on one ring
+      if (con.labels ?? true) {
+        // a mean direction, not a mean number: Pisces straddles 0°
+        let sx = 0;
+        let sy = 0;
+        for (const [lon] of fig.stars) {
+          sx += Math.cos(lon * DEG);
+          sy += Math.sin(lon * DEG);
+        }
+        const meanLon = Math.atan2(sy, sx) / DEG + shift;
+        const p = view.at(meanLon, view.R2 + artBand + 9);
+        if (view.onScreen(p, 0)) {
+          ctx.globalAlpha = view.labelAlpha * 0.85;
+          ctx.fillStyle = lineColor;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.font = (ring.cfg.font ?? { css: '600 9.5px system-ui, sans-serif', px: 9.5 }).css;
+          const text = ring.cfg.language === 'he' ? fig.nameHe : fig.name;
+          ctx.fillText(text, p.x, p.y);
+          const w = ctx.measureText(text).width;
+          this.zodiacBoxes.push({ x: p.x - w / 2, y: p.y - 6, w, h: 12 });
+        }
+      }
+
+      const shown = pts.filter((p) => view.onScreen(p, 60));
+      if (shown.length > 1)
+        this.zodiacZones.push({
+          id: `constellation:${fig.code}`,
+          text: `${fig.name} · ${fig.nameHe}`,
+          sub: con.note ?? CONSTELLATION_NOTE,
+          color: starColor,
+          pts: shown,
+        });
+    }
+    ctx.globalAlpha = view.alpha;
+  }
+
+  /**
+   * Hand the ring's hover zones to the controller, after Scene.draw() has
+   * had its own `begin()` — which is why this is a step of its own rather
+   * than something drawZodiac() does as it draws. Registering them last
+   * also settles every tie in the scene's favour: a reading's tick sits
+   * *on* the band, and pointing at it should explain the reading.
+   */
+  markZodiacHover(hover: HoverController | undefined): void {
+    if (!hover) return;
+    for (const zone of this.zodiacZones) hover.mark(zone.pts, zone.text, zone.sub, zone.color, zone.id);
   }
 
   /** drawLabels(), pre-loaded with this stage's own obstacles (DOM chrome
@@ -507,6 +735,8 @@ export class Stage {
     showRings?: boolean;
     zodiacAlpha?: number;
     zodiacLabels?: boolean;
+    /** the ring's names' own alpha - see drawZodiac's `labelAlpha` */
+    zodiacLabelAlpha?: number;
     extraObstacles?: Box[];
     backgroundTime?: number;
     beforeScene?: () => void;
@@ -514,7 +744,12 @@ export class Stage {
   }): void {
     const ref = resolvePoint(opts.ref, opts.f);
     this.drawBackground(opts.backgroundTime ?? performance.now());
-    this.drawZodiac(opts.f, ref, { alpha: opts.zodiacAlpha, labels: opts.zodiacLabels, scene: opts.scene });
+    this.drawZodiac(opts.f, ref, {
+      alpha: opts.zodiacAlpha,
+      labels: opts.zodiacLabels,
+      labelAlpha: opts.zodiacLabelAlpha,
+      scene: opts.scene,
+    });
     opts.beforeScene?.();
     const labels = opts.scene.draw({
       ctx: this.ctx,
@@ -530,11 +765,21 @@ export class Stage {
       // what a reading whose own point has left the frame pins its name to
       bounds: { width: this.w, safeBottom: this.safeBottom || this.h },
     });
+    this.markZodiacHover(opts.hover);
     opts.hover?.update(opts.pointer);
     opts.afterScene?.(labels);
     this.drawLabels(labels, opts.theme, opts.extraObstacles);
     if (opts.hover) opts.hover.drawHighlight(this.ctx, opts.theme.ink);
   }
+}
+
+/** One hoverable piece of the ring, in screen space - see `zodiacZones`. */
+interface ZodiacZone {
+  id: string;
+  text: string;
+  sub: string;
+  color: string;
+  pts: Vec[];
 }
 
 /** A Stage takes either a ring the figure built (so its `inner`/`outer`

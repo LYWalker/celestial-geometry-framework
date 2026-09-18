@@ -45,6 +45,7 @@ export * from './marker.js';
 export * from './trail.js';
 export * from './scene.js';
 export * from './zodiac.js';
+export * from './constellations.js';
 export * from './transitions.js';
 export * from './selection.js';
 export * from './describe.js';
