@@ -34,8 +34,15 @@ export interface ConstellationFigure {
   name: string;
   /** the name the sign of the same name carries in Hebrew */
   nameHe: string;
-  /** `[ecliptic longitude °, ecliptic latitude °, visual magnitude]`, J2000 */
-  stars: readonly (readonly [number, number, number])[];
+  /**
+   * `[ecliptic longitude °, ecliptic latitude °, visual magnitude]`, J2000,
+   * with the star's proper name where it has one and is bright enough to be
+   * one anybody steers by — Aldebaran, Regulus, Spica, Antares and the rest.
+   * A drawing decides for itself which of those are worth writing (see
+   * `ZodiacConstellations.nameStarsBrighterThan`); the data only says which
+   * star is which.
+   */
+  stars: readonly (readonly [number, number, number] | readonly [number, number, number, string])[];
   /** the stick figure, as runs of indexes into `stars` */
   paths: readonly (readonly number[])[];
 }
@@ -56,11 +63,13 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
     nameHe: 'טלה',
     stars: [
       [48.2, 10.45, 3.6],
-      [37.66, 9.97, 2],
-      [33.97, 8.49, 2.6],
+      [37.66, 9.97, 2, 'Hamal'],
+      [33.97, 8.49, 2.6, 'Sheratan'],
       [33.18, 7.16, 3.9],
     ],
-    paths: [[0, 1, 2, 3]],
+    paths: [
+      [0, 1, 2, 3],
+    ],
   },
   {
     code: 'Tau',
@@ -68,12 +77,12 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
     nameHe: 'שור',
     stars: [
       [84.78, -2.2, 3],
-      [69.79, -5.47, 0.9],
+      [69.79, -5.47, 0.9, 'Aldebaran'],
       [67.96, -5.84, 3.4],
       [65.81, -5.73, 3.6],
       [66.87, -3.97, 3.8],
       [68.47, -2.57, 3.5],
-      [82.57, 5.39, 1.6],
+      [82.57, 5.39, 1.6, 'Elnath'],
       [60.63, -7.96, 3.4],
       [51.91, -8.8, 3.7],
       [59.92, -14.45, 3.9],
@@ -95,12 +104,12 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
       [95.3, -0.82, 2.9],
       [99.94, 2.07, 3.1],
       [105.44, 7.75, 4.4],
-      [110.24, 10.1, 1.6],
-      [113.22, 6.68, 1.2],
+      [110.24, 10.1, 1.6, 'Castor'],
+      [113.22, 6.68, 1.2, 'Pollux'],
       [111.34, 5.22, 4.1],
       [108.52, -0.18, 3.5],
       [104.99, -2.04, 4],
-      [99.1, -6.74, 1.9],
+      [99.1, -6.74, 1.9, 'Alhena'],
       [101.21, -10.1, 3.4],
       [108.78, -5.64, 3.6],
     ],
@@ -130,11 +139,11 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
     name: 'Leo',
     nameHe: 'אריה',
     stars: [
-      [149.83, 0.46, 1.4],
+      [149.83, 0.46, 1.4, 'Regulus'],
       [147.91, 4.87, 3.5],
-      [149.61, 8.81, 2],
-      [161.32, 14.33, 2.6],
-      [171.62, 12.27, 2.1],
+      [149.61, 8.81, 2, 'Algieba'],
+      [161.32, 14.33, 2.6, 'Zosma'],
+      [171.62, 12.27, 2.1, 'Denebola'],
       [163.42, 9.67, 3.3],
       [147.57, 11.87, 3.4],
       [141.43, 12.35, 3.9],
@@ -155,7 +164,7 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
       [184.83, 1.37, 3.9],
       [190.14, 2.79, 2.7],
       [198.24, 1.74, 4.4],
-      [203.84, -2.05, 1],
+      [203.84, -2.05, 1, 'Spica'],
       [213.8, 7.2, 4.1],
       [220.13, 9.67, 3.9],
       [189.94, 16.21, 2.9],
@@ -177,7 +186,7 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
     stars: [
       [230.69, -7.64, 3.2],
       [225.08, 0.33, 2.8],
-      [229.37, 8.5, 2.6],
+      [229.37, 8.5, 2.6, 'Zubeneschamali'],
       [235.14, 4.39, 3.9],
       [238.61, -8.51, 3.6],
       [239.35, -10.02, 3.7],
@@ -193,19 +202,19 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
     nameHe: 'עקרב',
     stars: [
       [242.94, -5.48, 2.9],
-      [242.57, -1.99, 2.3],
-      [243.19, 1.01, 2.6],
+      [242.57, -1.99, 2.3, 'Dschubba'],
+      [243.19, 1.01, 2.6, 'Acrab'],
       [247.8, -4.04, 2.9],
-      [249.76, -4.57, 1.1],
+      [249.76, -4.57, 1.1, 'Antares'],
       [251.46, -6.12, 2.8],
-      [255.34, -11.74, 2.3],
+      [255.34, -11.74, 2.3, 'Larawag'],
       [256.16, -15.42, 3],
       [257.24, -19.64, 3.6],
       [260.74, -20.18, 3.3],
-      [265.6, -19.65, 1.9],
+      [265.6, -19.65, 1.9, 'Sargas'],
       [267.52, -16.71, 3],
-      [266.47, -15.64, 2.4],
-      [264.59, -13.79, 1.6],
+      [266.47, -15.64, 2.4, 'Mula'],
+      [264.59, -13.79, 1.6, 'Shaula'],
     ],
     paths: [
       [0, 1, 2],
@@ -218,13 +227,13 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
     nameHe: 'קשת',
     stars: [
       [273.63, -13.38, 3.1],
-      [275.08, -11.05, 1.8],
+      [275.08, -11.05, 1.8, 'Kaus Australis'],
       [274.58, -6.47, 2.7],
       [276.32, -2.14, 2.8],
       [273.21, 2.34, 3.8],
       [285.78, -22.14, 4],
       [286.64, -18.38, 4],
-      [283.64, -7.18, 2.6],
+      [283.64, -7.18, 2.6, 'Ascella'],
       [280.18, -3.95, 3.2],
       [292.56, -20.66, 4.1],
       [294.87, -14.39, 4.4],
@@ -232,7 +241,7 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
       [291.85, -3.26, 4.6],
       [289.34, -2.49, 5],
       [287.04, -2.93, 4.9],
-      [282.39, -3.45, 2],
+      [282.39, -3.45, 2, 'Nunki'],
       [271.26, -6.99, 3],
       [284.83, -5.09, 3.3],
       [284.99, 0.86, 3.8],
@@ -266,7 +275,9 @@ export const ZODIAC_FIGURES: readonly ConstellationFigure[] = [
       [317.68, -1.37, 4.3],
       [313.84, -0.59, 4.1],
     ],
-    paths: [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]],
+    paths: [
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+    ],
   },
   {
     code: 'Aqr',

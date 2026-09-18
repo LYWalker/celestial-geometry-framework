@@ -19,7 +19,9 @@ import {
   CONSTELLATION_LINE_COLOR,
   CONSTELLATION_NOTE,
   CONSTELLATION_STAR_COLOR,
+  DEFAULT_LATITUDE_GAIN_LIMIT,
   DEFAULT_LATITUDE_SPAN,
+  DEFAULT_STAR_NAME_MAG,
   ZODIAC_COLOR,
   ZODIAC_LABEL_COLOR,
   ZODIAC_NOTE,
@@ -487,17 +489,6 @@ export class Stage {
       ctx.stroke();
     }
 
-    if (z.constellations && geom.artBand > 0)
-      this.drawConstellations(f, geom, {
-        cx,
-        cy,
-        R2,
-        alpha,
-        labelAlpha,
-        at,
-        onScreen,
-      });
-
     const Rl = (R + R2) / 2;
     if (opts.labels ?? true) {
       ctx.globalAlpha = labelAlpha;
@@ -533,6 +524,13 @@ export class Stage {
       }
       ctx.globalAlpha = alpha;
     }
+
+    // After the names, not before: the art's own words (a figure's name, a
+    // named star) are dropped where they would print over something already
+    // placed, and the ring's own names have the better claim on the space.
+    // Nothing is drawn over anything either way — the art has its own band.
+    if (z.constellations && geom.artBand > 0)
+      this.drawConstellations(f, geom, { cx, cy, R2, alpha, labelAlpha, at, onScreen });
 
     // One hover zone per segment, whether or not its name is drawn. A drawn
     // zodiac is the piece of a figure a reader is least likely to have been
@@ -597,13 +595,41 @@ export class Stage {
     const half = (artBand / 2) * 0.92;
     const span = con.latitudeSpan ?? DEFAULT_LATITUDE_SPAN;
     const shift = ring.lonOffset(f);
+
+    /*
+     * Latitude onto the band. A linear map would divide `half` by `span`
+     * and be done, and would also flatten every figure by the ratio between
+     * that and the ring's own scale — about three to one here, which is the
+     * difference between Leo and a smear. So the map is stretched at the
+     * ecliptic to match the ring's own degrees-per-pixel, and eased off
+     * outward so that `span` still lands exactly on the band's edge and
+     * nothing has to be clipped:
+     *
+     *     u(t) = t·g / (1 + (g−1)·|t|),  t = lat/span, u(±1) = ±1
+     *
+     * — slope `g` at the middle, monotonic, no pile-up at the rim. See
+     * ZodiacConstellations.latitudeSpan, where the trade is argued.
+     */
+    const perDegreeAlongRing = (mid * Math.PI) / 180;
+    const perDegreeAcrossBand = half / span;
+    const gain = Math.max(
+      1,
+      Math.min(con.latitudeGainLimit ?? DEFAULT_LATITUDE_GAIN_LIMIT, perDegreeAlongRing / perDegreeAcrossBand),
+    );
+    const radiusAt = (lat: number): number => {
+      const t = Math.max(-1, Math.min(1, lat / span));
+      const a = Math.abs(t);
+      return mid + Math.sign(t) * ((a * gain) / (1 + (gain - 1) * a)) * half;
+    };
+    const nameMag = con.nameStarsBrighterThan ?? DEFAULT_STAR_NAME_MAG;
+    // Names need room of their own; on a ring drawn small they would be a
+    // ribbon of overlapping words round the rim rather than a help.
+    const writeNames = nameMag !== false && artBand > 54;
     const starColor = con.starColor ?? CONSTELLATION_STAR_COLOR;
     const lineColor = con.color ?? CONSTELLATION_LINE_COLOR;
 
     for (const fig of con.figures) {
-      const pts = fig.stars.map(([lon, lat]) =>
-        view.at(lon + shift, mid + Math.max(-1, Math.min(1, lat / span)) * half),
-      );
+      const pts = fig.stars.map(([lon, lat]) => view.at(lon + shift, radiusAt(lat)));
       if (!pts.some((p) => view.onScreen(p, 60))) continue;
 
       // The art keeps the names' alpha, not the ring lines': a ring dimmed
@@ -622,17 +648,60 @@ export class Stage {
         });
       ctx.stroke();
 
+      ctx.globalAlpha = view.labelAlpha;
       ctx.fillStyle = starColor;
       fig.stars.forEach(([, , mag], i) => {
         const p = pts[i]!;
-        // first magnitude reads at ~2.2px and fifth at ~0.8px: what makes a
-        // pattern recognisable is the bright stars standing out from the
-        // rest, not how big any of them is
-        const r = Math.max(0.8, 2.6 - 0.4 * mag);
+        // First magnitude reads at ~2.4px and fifth at ~0.7px. What makes a
+        // pattern recognisable is the bright stars standing clear of the
+        // rest — the eye finds Antares and Aldebaran first and the shape
+        // afterwards — so the spread matters more than any one size, and
+        // the brightest get a little halo the fainter ones don't.
+        const r = Math.max(0.7, 2.9 - 0.52 * mag);
+        ctx.shadowColor = mag <= 2 ? starColor : 'transparent';
+        ctx.shadowBlur = mag <= 2 ? 5 : 0;
         ctx.beginPath();
         ctx.arc(p.x, p.y, r, 0, FULL_CIRCLE);
         ctx.fill();
       });
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = 'transparent';
+
+      // the few stars anyone steers by, named: the fastest way into a
+      // pattern is a word you already know sitting on it
+      if (writeNames) {
+        ctx.font = (ring.cfg.font ?? { css: '600 9.5px system-ui, sans-serif', px: 9.5 }).css;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.globalAlpha = view.labelAlpha * 0.8;
+        // brightest first, because a name that cannot be fitted is dropped
+        // below and the one worth keeping is the one the eye finds first
+        const named = fig.stars
+          .map((star, i) => ({ star, i }))
+          .filter(({ star }) => star[3] && star[2] <= (nameMag as number))
+          .sort((a, b) => a.star[2] - b.star[2]);
+        named.forEach(({ star, i }) => {
+          const proper = star[3]!;
+          const p = pts[i]!;
+          if (!view.onScreen(p, 0)) return;
+          // pushed off the star along the band, away from the ecliptic, so
+          // the word doesn't sit on the lines joining it to its neighbours
+          const outward = star[1] >= 0 ? 1 : -1;
+          const d = Math.hypot(p.x - view.cx, p.y - view.cy) || 1;
+          const q = { x: p.x + ((p.x - view.cx) / d) * 8 * outward, y: p.y + ((p.y - view.cy) / d) * 8 * outward };
+          const w = ctx.measureText(proper).width;
+          const box = { x: q.x - w / 2, y: q.y - 6, w, h: 12 };
+          // Southern figures push their names inward, into the same stretch
+          // of rim — Antares, Shaula and Kaus Australis all land within a
+          // few degrees of each other. A name that would print over one
+          // already placed is dropped rather than overprinted, and since the
+          // list is walked brightest first, what survives is the star most
+          // worth naming.
+          if (this.zodiacBoxes.some((b) => overlaps(b, box))) return;
+          ctx.fillText(proper, q.x, q.y);
+          this.zodiacBoxes.push(box);
+        });
+      }
 
       // the figure's own name, out at the rim, where it can be read against
       // the sign name sitting further in — which is the whole point of
@@ -771,6 +840,11 @@ export class Stage {
     this.drawLabels(labels, opts.theme, opts.extraObstacles);
     if (opts.hover) opts.hover.drawHighlight(this.ctx, opts.theme.ink);
   }
+}
+
+/** Do two screen-space label boxes touch? */
+function overlaps(a: Box, b: Box): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
 /** One hoverable piece of the ring, in screen space - see `zodiacZones`. */

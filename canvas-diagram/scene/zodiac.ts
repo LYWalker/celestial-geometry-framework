@@ -60,16 +60,34 @@ export interface ZodiacConstellations {
    * Default: twice the name band. */
   band?: number;
   /**
-   * How many degrees of ecliptic latitude the art band spans, either side
-   * of the ecliptic; a star further off than this is drawn at the edge
-   * rather than dropped. The figures are squashed radially by whatever
-   * ratio this makes against the ring's own degrees-per-pixel — unavoidable
-   * on a ring (Scorpius is 25° long and 21° deep, and the band is nothing
-   * like as deep as it is long), and the reason to keep the number here
-   * rather than buried: it is the one knob that trades "recognisable
-   * shape" against "how much rim the figure can spare." Default 20.
+   * How many degrees of ecliptic latitude reach the outer edge of the art
+   * band; a star further off than this is drawn at the edge rather than
+   * dropped. Default 20, which takes in every star of the twelve.
+   *
+   * Latitude is *not* mapped onto that band linearly. A ring is far longer
+   * than it is deep — at the orrery's size, a degree of longitude is about
+   * 7px of arc and a degree of latitude would be 2.5px of band — so a
+   * linear band flattens every figure to a third of its height and Leo
+   * stops looking like Leo. Instead the mapping is stretched so that near
+   * the ecliptic, where most of the bright stars are, a degree of latitude
+   * covers the same distance as a degree of longitude and the shape is
+   * true; it then eases off smoothly outward so the deep tails (Scorpius'
+   * sting, the Hyades) still land inside the band instead of piling up on
+   * its edge. The stretch is derived from the ring's own radius and the
+   * band's width, and capped by `latitudeGainLimit`.
    */
   latitudeSpan?: number;
+  /** A ceiling on the stretch described under `latitudeSpan`, for a band so
+   * narrow that matching the ring's scale at the ecliptic would leave
+   * everything else squashed into the last few pixels. Default 3.2. */
+  latitudeGainLimit?: number;
+  /**
+   * Write the proper names of stars at least this bright — Aldebaran,
+   * Regulus, Spica, Antares. They are how anyone actually finds a
+   * constellation, which is the whole job the art is doing here. Default
+   * 1.9; `false` for none.
+   */
+  nameStarsBrighterThan?: number | false;
   /** degrees added to every star's J2000 longitude. Pass
    * `(f) => PRECESSION_DEG_PER_DAY * daysSinceJ2000(f.t)` for a figure with
    * a clock on it, and the stars drift against the signs as it runs.
@@ -211,9 +229,14 @@ export interface ZodiacGeometry {
 export const ZODIAC_AUTO_PADDING = 28;
 
 /** See `ZodiacConstellations.latitudeSpan`. Twenty degrees takes in every
- * star of the twelve figures but the deep tails of Scorpius, Sagittarius
- * and the Hyades, which are drawn at the band's edge instead. */
+ * star of the twelve figures, the deep tails of Scorpius, Sagittarius and
+ * the Hyades included. */
 export const DEFAULT_LATITUDE_SPAN = 20;
+/** See `ZodiacConstellations.latitudeGainLimit`. */
+export const DEFAULT_LATITUDE_GAIN_LIMIT = 3.2;
+/** See `ZodiacConstellations.nameStarsBrighterThan`. First magnitude and a
+ * little over: the dozen or so the sky is navigated by. */
+export const DEFAULT_STAR_NAME_MAG = 1.9;
 
 export class ZodiacRing {
   private scene: Scene | null = null;
