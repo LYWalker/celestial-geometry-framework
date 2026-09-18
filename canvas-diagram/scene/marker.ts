@@ -9,12 +9,23 @@
  * "where the ray lands" are the same spot and nothing can drift. A *mean*
  * place is sighted from somewhere else: the sun's circle's own centre, the
  * moon's large circle's own centre. On a ring of finite radius those two
- * spots are not the same, and a figure that draws the line at the ray's
- * angle and the tick at the longitude's angle leaves them visibly apart
- * right at the ring — which is where the eye is, and which is what the
- * mean/true distinction is about. A RingMarker resolves that intersection
- * once (`rayToCircle`) and *is* the resulting point, so the line drawn `to`
- * it, the tick it draws, and the name it hangs are the same answer by
+ * spots are not the same, and which of them the reading belongs at is a
+ * question about what the ring is, not about the drawing:
+ *
+ * - A ring standing in for the sky (`parallax: 'none'`, the default) is
+ *   infinitely far off. Every direction counted from anywhere inside the
+ *   figure arrives at the same place on it, so the reading sits at the
+ *   bearing itself, measured from the centre — which is what makes the tick
+ *   land in the sign the stated longitude actually names. The sightline
+ *   drawn from the off-centre pivot to that point is then off true bearing
+ *   by `offset / radius`, which on a real figure is a fraction of a degree
+ *   of tilt in one dashed line: invisible, and the right thing to spend,
+ *   because the alternative is spending it where the eye is instead.
+ * - A ring that is really a circle of that radius (`parallax: 'finite'`)
+ *   meets the ray where it meets it, and the reading is that intersection.
+ *
+ * Either way the marker resolves the point once and *is* it, so the line
+ * drawn `to` it, the tick it draws and the name it hangs are one answer by
  * construction rather than three calculations that happen to match.
  *
  * It also knows what to do when its point is off screen — the usual case
@@ -34,6 +45,7 @@ import {
   type Scalar,
   ORIGIN,
   SceneObject,
+  directionOnCircle,
   rayToCircle,
   resolvePoint,
   resolveScalar,
@@ -52,6 +64,15 @@ export interface RingMarkerConfig extends Meta {
   pivot?: PointLike;
   /** the bearing from `pivot` — the longitude being read. */
   toward: DirectionLike;
+  /**
+   * How far away the ring is really supposed to be — see this file's own
+   * header, which is where the choice is argued. `'none'` (the default)
+   * reads the ring as the sky at infinity and puts the reading at its
+   * bearing from `center`; `'finite'` puts it where the ray from `pivot`
+   * actually crosses the circle. Identical whenever `pivot` is `center`,
+   * which is every true place.
+   */
+  parallax?: 'none' | 'finite';
   /**
    * `'solid'` (the default) — a filled dot, for a place the earth actually
    * sees. `'open'` — a ring, for a mean place: something in the
@@ -81,12 +102,8 @@ export class RingMarker extends SceneObject<RingMarkerConfig> implements Positio
 
   constructor(cfg: RingMarkerConfig) {
     super(cfg);
-    this.point = rayToCircle(
-      cfg.pivot ?? cfg.center ?? ORIGIN,
-      cfg.toward,
-      cfg.center ?? ORIGIN,
-      cfg.radius,
-    );
+    const place = cfg.parallax === 'finite' ? rayToCircle : directionOnCircle;
+    this.point = place(cfg.pivot ?? cfg.center ?? ORIGIN, cfg.toward, cfg.center ?? ORIGIN, cfg.radius);
   }
 
   /** Where this reading lands on the ring — what the sightline should be

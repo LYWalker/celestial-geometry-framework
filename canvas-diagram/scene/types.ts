@@ -24,7 +24,7 @@
  * Sphere) instead of re-walking a chain of parents on every read.
  */
 
-import { type Vec, dot, lonOf, sub, unit } from '../geometry.js';
+import { type Vec, dot, lonOf, polar, sub, unit } from '../geometry.js';
 import type { Camera } from '../camera.js';
 import type { Face } from '../labels.js';
 
@@ -217,6 +217,41 @@ export function rayToCircle(
       // rather than hand back a point on a circle that has no size yet.
       if (!(r > 0)) return { x: o.x, y: o.y };
       return rayCircleFar(o, resolveDirection(toward, o, f), c, r);
+    },
+  };
+}
+
+/**
+ * The point on a circle at the bearing `toward`, *as counted from*
+ * `origin` — the same construction as `rayToCircle`, minus the parallax.
+ *
+ * The two differ only when `origin` is not the circle's own centre, and
+ * what the difference is worth turning on depends entirely on what the
+ * circle is standing for. A circle that is really there at the radius
+ * drawn (a wheel, a rim, a track) meets the ray where it meets it:
+ * `rayToCircle`. A circle standing in for the sky does not: the sky is
+ * infinitely far off, every direction counted from anywhere in the figure
+ * arrives at the same point on it, and the reading belongs at the bearing
+ * itself, measured from the centre. Drawing it where the ray happens to
+ * cross a ring of finite radius puts it out by `offset / radius` radians —
+ * on the Rambam orrery, up to two degrees of a thirty-degree sign, which
+ * is a misreading and not a rounding.
+ */
+export function directionOnCircle(
+  origin: PointLike,
+  toward: DirectionLike,
+  center: PointLike,
+  radius: Scalar,
+): Positioned {
+  return {
+    position(f: Frame): Vec {
+      const o = resolvePoint(origin, f);
+      const c = resolvePoint(center, f);
+      const r = resolveScalar(radius, f);
+      // see rayToCircle: a ring still measuring itself reports no radius
+      if (!(r > 0)) return { x: o.x, y: o.y };
+      const d = polar(resolveDirection(toward, o, f), r);
+      return { x: c.x + d.x, y: c.y + d.y };
     },
   };
 }
