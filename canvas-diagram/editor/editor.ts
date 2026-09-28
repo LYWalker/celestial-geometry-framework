@@ -1,5 +1,5 @@
 /**
- * The editor: a live figure you can click, drag and describe.
+ * The editor: a live figure you draw, click, drag and describe.
  *
  * The layout is three columns over one strip, and each part answers one
  * question. The list on the left: what is in this figure. The canvas in the
@@ -7,41 +7,61 @@
  * with its sliders where they are. The panel on the right: what exactly is
  * this thing I have selected. The strip below: what is wrong, if anything.
  *
+ * Building happens on the canvas, with tools, the way a drawing program works:
+ * press on the earth and drag out a sphere; drag from one body to another for
+ * a line between them; click a vertex and two targets for an angle. Wherever a
+ * tool is pressed on a body or a point, it *attaches* — the new object holds a
+ * reference to it rather than a copy of its coordinates, so the figure keeps
+ * holding together when things move. That one rule (it snaps, and a snap is a
+ * reference) is what makes an epicycle a single drag instead of a panel of
+ * fields.
+ *
  * Everything in it is a function of `EditorState`. There is no second copy of
  * the figure anywhere, no cached DOM that has to be kept in step — an edit
  * replaces the document, the document recompiles, and every panel rebuilds
- * from what it now says. The only thing that persists across a rebuild is the
- * caret in whatever text field you were typing in, which the inspector
- * restores itself.
+ * from what it now says.
  *
  * Drawing is the exception, and deliberately so: the canvas redraws on an
  * animation frame, not on an edit, because a figure with a running clock is
- * redrawing anyway. An edit does not request a draw; the draw loop simply
- * always shows the current state.
+ * redrawing anyway.
+ *
+ * The camera fits a figure when it is opened, and then stays where it is.
+ * Re-fitting after every edit sounds helpful and is the opposite: drag a rim
+ * outwards, the view zooms out to fit it, the rim slides back under the
+ * pointer, and the drag runs away from the hand making it. `F` (or the Fit
+ * button) re-fits on request.
  */
 
 import { panBy, worldToScreen, zoomAt } from '../camera.js';
-import type { Vec } from '../geometry.js';
+import { lonOf, norm360, polar, sub, type Vec } from '../geometry.js';
 import { HoverController } from '../hover.js';
+import { Sphere } from '../scene/sphere.js';
 import { Stage, WHEEL_ZOOM_SENSITIVITY, wireResize } from '../scene/stage.js';
 import { resolvePoint, type Frame } from '../scene/types.js';
+import { varName } from './compile.js';
 import { emitDocument, type EmitOptions } from './emit.js';
+import { formatLongitude } from './units.js';
+import { centralSun } from './bodies.js';
 import { clear, el, select } from './dom.js';
 import {
   emptyDoc,
-  OBJECT_KINDS,
+  idFromName,
+  isRef,
+  MAZALOT,
   parseDoc,
   POSITIONED_KINDS,
   type DiagramDoc,
+  type DirValue,
   type ObjectDoc,
   type ObjectKind,
+  type PointValue,
 } from './doc.js';
 import { renderFigurePanel } from './figure.js';
-import { KIND_LABELS, KIND_NOTES } from './fields.js';
+import { KIND_LABELS } from './fields.js';
 import { HANDLE_GRAB_PX, HANDLE_SIZE_PX, handlesFor, type Handle } from './handles.js';
-import { renderInspector } from './inspector.js';
+import { renderInspector, type QuickAction } from './inspector.js';
 import { EDITOR_CSS } from './styles.js';
-import { EditorState } from './state.js';
+import { EditorState, setPath } from './state.js';
 import type { Helpers } from './expr.js';
 
 export interface EditorOptions {
@@ -71,6 +91,118 @@ export interface EditorHandle {
   doc(): DiagramDoc;
   destroy(): void;
 }
+
+/* -------------------------------------------------------------------------
+ * Tools
+ * ---------------------------------------------------------------------- */
+
+type Tool = 'select' | ObjectKind;
+
+interface ToolSpec {
+  tool: Tool;
+  key: string;
+  icon: string;
+  label: string;
+  /** what to do next, one line per step of the gesture */
+  steps: string[];
+}
+
+const TOOLS: ToolSpec[] = [
+  { tool: 'select', key: 'v', icon: '↖', label: 'Select', steps: [''] },
+  {
+    tool: 'sphere',
+    key: 's',
+    icon: '◯',
+    label: 'Sphere',
+    steps: [
+      'Press on what it is centred on — the earth, a body (for an epicycle), or another sphere’s centre.',
+      'Drag or click out the radius. It snaps to bodies and to spheres sharing its centre; type the exact value after.',
+    ],
+  },
+  {
+    tool: 'connector',
+    key: 'l',
+    icon: '╱',
+    label: 'Line',
+    steps: [
+      'Press on where the line starts — a body, a point, or a sphere’s centre.',
+      'End on another object to join them, or on the mazalot ring for a sightline toward that longitude.',
+    ],
+  },
+  {
+    tool: 'angle',
+    key: 'a',
+    icon: '∠',
+    label: 'Angle',
+    steps: [
+      'Click the vertex — where the angle is seen from.',
+      'Click what the first arm points at — an object, or a longitude on the ring.',
+      'Click what the second arm points at.',
+    ],
+  },
+  {
+    tool: 'anchor',
+    key: 'p',
+    icon: '✛',
+    label: 'Point',
+    steps: ['Click a body, a sphere’s centre, or a longitude on the ring, to name that place.'],
+  },
+  { tool: 'trail', key: 't', icon: '⋰', label: 'Trail', steps: ['Click a body to draw where it has been.'] },
+  {
+    tool: 'ringmarker',
+    key: 'r',
+    icon: '⊙',
+    label: 'Reading',
+    steps: ['Click a body to mark where it is read on the ring.'],
+  },
+]
+
+/** What a tool press can land on: a body or named point, a sphere's own
+ * centre, or a longitude on the mazalot ring. */
+type SnapKind = 'object' | 'centre' | 'ring';
+
+/**
+ * What a tool press landed on. Never a bare place: everything in these
+ * figures is where it is *because of* something else — centred on the earth,
+ * riding a sphere, pointing at a degree of a sign — and a point dropped in
+ * empty space is a coordinate nobody can state, which is the one kind of
+ * value a precise figure should not have.
+ */
+interface Snap {
+  kind: SnapKind;
+  /** the object it belongs to — the body or point itself, or the sphere
+   * whose centre it is. Null on the ring. */
+  id: string | null;
+  world: Vec;
+  /** what it is called, on the canvas beside it and in the hint */
+  name: string;
+  /** on the ring: the longitude, to the whole degree */
+  lon?: number;
+}
+
+/** A tool gesture in progress — a sphere being dragged out, an angle waiting
+ * for its second arm. */
+interface Gesture {
+  tool: ObjectKind;
+  snaps: Snap[];
+  /** where the press went down, for the tools that are one drag */
+  down: Vec | null;
+}
+
+/** A reference field waiting for its target to be clicked. */
+interface Pick {
+  id: string;
+  path: string;
+  label: string;
+  accepts: 'point' | 'dir';
+}
+
+/** The editor's own accent — its marks, over the figure's. */
+const ACCENT = '#8fd6c9';
+
+/** How close, in screen px, a tool has to come to attach to something —
+ * generous, since attaching is the only thing a tool press can do. */
+const SNAP_PX = 18;
 
 /** Mount the editor into `host`, which it takes over entirely. */
 export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): EditorHandle {
@@ -114,15 +246,28 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
 
   let pointer: Vec | null = null;
   let panel: 'object' | 'figure' = 'object';
-  let placing: ObjectKind | null = null;
+  let tool: Tool = 'select';
+  let gesture: Gesture | null = null;
+  let pick: Pick | null = null;
   let dragging: Handle | null = null;
   let panning: { x: number; y: number } | null = null;
   let hotHandle: Handle | null = null;
+  /** whether Shift was down at the last pointer event — finer steps */
+  let shiftHeld = false;
+  /** a one-off message in the hint strip — "that needs a body" */
+  let flash: { text: string; until: number } | null = null;
   let lastTick = performance.now();
   /** the compiled figure the stage was last configured for — the background
    * and ring are Stage's, not Scene's, so they are pushed across on the edits
    * that change them rather than every frame */
   let stagedFor = state.fig;
+  /** the world radius the camera is fitted to, measured when a figure is
+   * opened (or on request) and then held, so edits never move the view */
+  let fitRadius = 150;
+  /** re-fit on the next frame, once the Stage has the ring an edit just added */
+  let refitNext = false;
+  /** which load the camera was last fitted for — see `state.loads` */
+  let fittedFor = -1;
 
   function refPoint(): Vec {
     return resolvePoint(state.fig.ref, state.frame());
@@ -143,13 +288,29 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
     return worldToScreen(world, refPoint(), stage.camera);
   }
 
-  function resize(): void {
+  /** How much of the world the figure as it stands wants to show. A floor
+   * under it, so a new figure that is only an earth opens at a scale where
+   * the first sphere drawn has room, not zoomed in on a point. */
+  function measureFit(): number {
+    if (state.doc.view.fitRadius !== 'auto') return state.doc.view.fitRadius;
     const f = state.frame();
-    const fit =
-      state.doc.view.fitRadius === 'auto'
-        ? (stage.zodiacGeometry(f, state.fig.scene)?.outer ?? state.fig.scene.extent(f) ?? 100) + 12
-        : state.doc.view.fitRadius;
-    stage.resize({ fitRadius: Math.max(20, fit) });
+    const reach = stage.zodiacGeometry(f, state.fig.scene)?.outer ?? state.fig.scene.extent(f);
+    return Math.max(140, reach + 12);
+  }
+
+  /** The canvas changed size: keep the same view of the world in it. */
+  function resize(): void {
+    stage.resize({ fitRadius });
+  }
+
+  /** Fit the camera to the figure, from scratch. Returns whether the canvas
+   * had a size to fit into yet. */
+  function refit(): boolean {
+    fitRadius = measureFit();
+    stage.camera.pan = { x: 0, y: 0 };
+    if (!stage.resize({ fitRadius })) return false;
+    stage.camera.zoom = stage.fit;
+    return true;
   }
 
   /* ---- drawing -------------------------------------------------------- */
@@ -162,8 +323,9 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
       stage.setBackground(state.fig.background);
       stage.setZodiac(state.fig.zodiac);
       stagedFor = state.fig;
-      resize();
     }
+    if (fittedFor !== state.loads && refit()) fittedFor = state.loads;
+    if (refitNext && refit()) refitNext = false;
 
     const f = state.frame();
     stage.render({
@@ -179,18 +341,22 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
     drawOverlay(f);
   }
 
-  /** The editor's own marks, over the figure: what is selected, and what can
-   * be dragged. Screen space, after Stage has finished — these are chrome,
-   * not part of the figure, and they must not zoom with it. */
+  /** The editor's own marks, over the figure: what is selected, what can be
+   * dragged, and what a tool is about to make. Screen space, after Stage has
+   * finished — these are chrome, not part of the figure, and they must not
+   * zoom with it. */
   function drawOverlay(f: Frame): void {
     const ctx = stage.ctx;
-    const selected = state.selected();
     hotHandle = null;
 
+    if (tool !== 'select' || pick !== null) {
+      drawToolPreview(ctx);
+      updateHint();
+      return;
+    }
+
+    const selected = state.selected();
     if (!selected) {
-      // Still say what a click will do: "add a sphere, then click to place it"
-      // is exactly the moment when nothing is selected yet, so the prompt has
-      // to survive there or it is missing when it is most needed.
       updateHint();
       return;
     }
@@ -236,15 +402,236 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
     updateHint();
   }
 
-  /** The line along the bottom of the figure: what is about to be placed, or
-   * what the handle under the pointer would do. */
+  /** What the active tool would do if the pointer went down here: a halo and
+   * a name on whatever it would attach to, a rubber band of the thing
+   * half-made — or, where there is nothing to attach to, a mark that says so. */
+  function drawToolPreview(ctx: CanvasRenderingContext2D): void {
+    if (!pointer) return;
+    const snap = snapAt(pointer);
+    const end = snap ? screenAt(snap.world) : pointer;
+
+    ctx.save();
+    ctx.strokeStyle = ACCENT;
+    ctx.lineWidth = 1.3;
+
+    const first = gesture?.snaps[0];
+    if (gesture && first) {
+      const a = screenAt(first.world);
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      if (gesture.tool === 'sphere') {
+        const r = sphereRadius(first, pointer);
+        ctx.arc(a.x, a.y, r.value * stage.camera.zoom, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        chip(ctx, pointer, `radius ${fmt(r.value)}${r.why ? ` — ${r.why}` : ''}`);
+      } else {
+        const b = gesture.tool === 'connector' || gesture.tool === 'angle' ? end : pointer;
+        for (const s of gesture.snaps.slice(1)) {
+          const c = screenAt(s.world);
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(c.x, c.y);
+        }
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      for (const s of gesture.snaps) dot(ctx, screenAt(s.world), 3.5);
+    }
+
+    const radiusFree = gesture?.tool === 'sphere';
+    if (snap && !radiusFree) {
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(143,214,201,0.2)';
+      ctx.beginPath();
+      ctx.arc(end.x, end.y, 15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(end.x, end.y, 15, 0, Math.PI * 2);
+      ctx.stroke();
+      dot(ctx, end, 3.5);
+      chip(ctx, end, snap.name);
+    } else if (!snap && !radiusFree) {
+      // nothing to attach to: a small muted cross where a press would do nothing
+      ctx.strokeStyle = 'rgba(150,160,189,0.6)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(pointer.x - 4, pointer.y - 4);
+      ctx.lineTo(pointer.x + 4, pointer.y + 4);
+      ctx.moveTo(pointer.x + 4, pointer.y - 4);
+      ctx.lineTo(pointer.x - 4, pointer.y + 4);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function dot(ctx: CanvasRenderingContext2D, p: Vec, r: number): void {
+    ctx.beginPath();
+    ctx.fillStyle = ACCENT;
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** A name on a dark tab beside a point — what a press here would attach to. */
+  function chip(ctx: CanvasRenderingContext2D, at: Vec, text: string): void {
+    ctx.save();
+    ctx.font = '600 11.5px "Inter Variable", Inter, system-ui, sans-serif';
+    const w = ctx.measureText(text).width + 14;
+    const h = 20;
+    const x = Math.min(Math.max(4, at.x + 18), stage.w - w - 4);
+    const y = Math.min(Math.max(4, at.y - 32), stage.h - h - 4);
+    ctx.fillStyle = 'rgba(7,11,22,0.94)';
+    ctx.strokeStyle = ACCENT;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 5);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = ACCENT;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x + 7, y + h / 2 + 0.5);
+    ctx.restore();
+  }
+
+  /** The line along the bottom of the figure: what to do next, or what the
+   * handle under the pointer does. */
   function updateHint(): void {
-    hintEl.textContent =
-      placing !== null
-        ? `${KIND_NOTES[placing]} Click in the figure to place it — on an object to attach it, or anywhere for a fixed point. Esc to stop.`
-        : (hotHandle?.label ?? '');
-    hintEl.classList.toggle('is-on', placing !== null || hotHandle !== null);
-    stageEl.style.cursor = placing !== null ? 'crosshair' : hotHandle !== null ? 'grab' : 'default';
+    let text = '';
+    if (flash && performance.now() < flash.until) text = flash.text;
+    else if (pick !== null) {
+      text = `Click the object for “${pick.label}”${pick.accepts === 'dir' ? ', or a longitude on the ring' : ', or a sphere’s centre'}. Esc to cancel.`;
+    } else if (tool !== 'select') {
+      const spec = TOOLS.find((t) => t.tool === tool);
+      const step = gesture ? gesture.snaps.length : 0;
+      text = spec?.steps[Math.min(step, spec.steps.length - 1)] ?? '';
+    } else text = hotHandle?.label ? `${hotHandle.label} · Shift for finer steps` : '';
+
+    if (hintEl.textContent !== text) hintEl.textContent = text;
+    hintEl.classList.toggle('is-on', text !== '');
+    const aiming = tool !== 'select' || pick !== null;
+    const onSomething = aiming && pointer !== null && (gesture?.tool === 'sphere' || snapAt(pointer) !== null);
+    stageEl.style.cursor = aiming ? (onSomething ? 'crosshair' : 'not-allowed') : hotHandle !== null ? 'grab' : 'default';
+  }
+
+  function say(text: string): void {
+    flash = { text, until: performance.now() + 3200 };
+  }
+
+  /** What the step in hand may land on. */
+  function accepts(): readonly SnapKind[] {
+    if (pick) return pick.accepts === 'point' ? ['object', 'centre'] : ['object', 'ring'];
+    switch (tool) {
+      case 'sphere':
+        return ['object', 'centre'];
+      case 'connector':
+        return gesture ? ['object', 'centre', 'ring'] : ['object', 'centre'];
+      case 'angle':
+        return gesture ? ['object', 'ring'] : ['object', 'centre'];
+      case 'anchor':
+        return ['object', 'centre', 'ring'];
+      case 'trail':
+      case 'ringmarker':
+        return ['object'];
+      default:
+        return [];
+    }
+  }
+
+  /**
+   * What a press at this screen point would attach to, or null.
+   *
+   * Bodies and named points first — only where drawn, since a bare shell's
+   * "position" is a point on its rim nobody can see. A sphere's own centre
+   * where it is a place in its own right (an eccentric's, not the earth it is
+   * centred on, which is already a target). The ring last, as a longitude to
+   * the whole degree, so an arm or a sightline can point at 26° of Gemini.
+   */
+  function snapAt(screen: Vec, kinds: readonly SnapKind[] = accepts()): Snap | null {
+    if (kinds.length === 0) return null;
+    const f = state.frame();
+    let best: Snap | null = null;
+    let bestDist = SNAP_PX;
+    const offer = (s: Snap): void => {
+      if (!Number.isFinite(s.world.x) || !Number.isFinite(s.world.y)) return;
+      const p = screenAt(s.world);
+      const d = Math.hypot(p.x - screen.x, p.y - screen.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = s;
+      }
+    };
+
+    for (const o of state.doc.objects) {
+      const item = state.fig.items.get(o.id);
+      if (!item) continue;
+      if (kinds.includes('object') && POSITIONED_KINDS.includes(o.kind) && 'position' in item) {
+        if (!(item instanceof Sphere && !item.showBody)) {
+          offer({ kind: 'object', id: o.id, world: (item as { position: (f: Frame) => Vec }).position(f), name: o.name || o.id });
+        }
+      }
+      if (kinds.includes('centre') && item instanceof Sphere && o.kind === 'sphere') {
+        if (o.eccentric !== undefined || o.center === undefined || !isRef(o.center)) {
+          offer({ kind: 'centre', id: o.id, world: item.centerAt(f), name: `centre of ${inline(o.id)}` });
+        }
+      }
+    }
+    if (best !== null) return best;
+
+    if (kinds.includes('ring')) {
+      const g = stage.zodiacGeometry(f, state.fig.scene);
+      if (g) {
+        const w = worldAt(screen);
+        const d = dist(g.center, w);
+        const slack = 10 / stage.camera.zoom;
+        if (d > g.radius - slack && d < g.outer + slack) {
+          const lon = Math.round(norm360(lonOf(sub(w, g.center)))) % 360;
+          const p = polar(lon, g.radius);
+          return {
+            kind: 'ring',
+            id: null,
+            world: { x: g.center.x + p.x, y: g.center.y + p.y },
+            name: `${formatLongitude(lon)} on the ring`,
+            lon,
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  /** The same, for an object already known — how a quick action "snaps" to
+   * the selection without a pointer. */
+  function snapOf(id: string): Snap | null {
+    const o = state.doc.objects.find((x) => x.id === id);
+    const item = state.fig.items.get(id);
+    if (!o || !item || !('position' in item)) return null;
+    return { kind: 'object', id, world: (item as { position: (f: Frame) => Vec }).position(state.frame()), name: o.name || id };
+  }
+
+  /**
+   * The radius a sphere being drawn from `center` would get with the pointer
+   * here: through a body or point, if the pointer is on one; the radius of a
+   * sphere it shares a centre with, if it is near one — nested shells are the
+   * commonest thing in these figures; otherwise the distance, to a whole
+   * world px (a tenth with Shift). The exact value is then a field away.
+   */
+  function sphereRadius(center: Snap, screen: Vec): { value: number; why: string } {
+    const through = snapAt(screen, ['object', 'centre']);
+    if (through && !(through.kind === center.kind && through.id === center.id)) {
+      return { value: round(dist(center.world, through.world)), why: `through ${inline(through.id) || through.name}` };
+    }
+    const raw = dist(center.world, worldAt(screen));
+    const f = state.frame();
+    for (const o of state.doc.objects) {
+      const item = state.fig.items.get(o.id);
+      if (!(item instanceof Sphere)) continue;
+      if (dist(item.centerAt(f), center.world) > 1e-6) continue;
+      const r = item.radiusAt(f);
+      if (Math.abs(r - raw) * stage.camera.zoom < 8) return { value: r, why: `same as ${inline(o.id)}` };
+    }
+    return { value: shiftHeld ? round(raw) : Math.round(raw), why: '' };
   }
 
   /**
@@ -291,10 +678,26 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
     stageEl.focus({ preventScroll: true });
     const p = localPoint(e);
     pointer = p;
+    shiftHeld = e.shiftKey;
 
-    if (placing !== null) {
-      place(placing, p);
-      placing = null;
+    // Any button but the first pans, whatever tool is out — so the view can
+    // be moved mid-gesture without putting the tool down.
+    if (e.button !== 0) {
+      panning = { x: p.x, y: p.y };
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    if (pick !== null) {
+      const s = snapAt(p);
+      if (s) completePick(s);
+      else say('Nothing to attach to there — click an object.');
+      return;
+    }
+
+    if (tool !== 'select') {
+      toolDown(tool, p);
+      if (gesture?.down) canvas.setPointerCapture(e.pointerId);
       return;
     }
 
@@ -317,8 +720,9 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
   canvas.addEventListener('pointermove', (e: PointerEvent) => {
     const p = localPoint(e);
     pointer = p;
+    shiftHeld = e.shiftKey;
     if (dragging) {
-      dragging.drag(worldAt(p), state);
+      dragging.drag(worldAt(p), state, e.shiftKey);
       return;
     }
     if (panning && e.buttons > 0) {
@@ -328,12 +732,24 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
 
   const endGesture = (e: PointerEvent): void => {
     const p = localPoint(e);
-    if (dragging) {
+    shiftHeld = e.shiftKey;
+    if (gesture?.down) {
+      const g = gesture;
+      const start = g.down as Vec;
+      const dragged = Math.hypot(p.x - start.x, p.y - start.y) > 5;
+      // A press that did not move is the first of two clicks: the gesture
+      // waits for the second, rather than guessing the rest.
+      if (!dragged) g.down = null;
+      else {
+        gesture = null;
+        finishGesture(g, p);
+      }
+    } else if (dragging) {
       dragging = null;
       state.breakCoalesce();
-    } else if (panning && Math.hypot(p.x - panning.x, p.y - panning.y) < 4) {
+    } else if (panning && e.button === 0 && Math.hypot(p.x - panning.x, p.y - panning.y) < 4) {
       // it never really moved: a click
-      const hit = state.fig.scene.hitTest(p, { f: state.frame(), ref: state.fig.ref, camera: stage.camera });
+      const hit = state.fig.scene.hitTest(p, { f: state.frame(), ref: state.fig.ref, camera: stage.camera, shapes: true });
       state.select(hit ? hit.id : null);
       if (hit) panel = 'object';
       renderAll();
@@ -346,6 +762,7 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
   canvas.addEventListener('pointerleave', () => {
     pointer = null;
   });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   canvas.addEventListener(
     'wheel',
@@ -364,57 +781,366 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
     { passive: false },
   );
 
-  stageEl.addEventListener('keydown', (e: KeyboardEvent) => {
+  /** Put a tool down: cancel whatever it was halfway through. */
+  function setTool(next: Tool): void {
+    tool = next;
+    gesture = null;
+    pick = null;
+    flash = null;
+    if (next !== 'select') state.setPlaying(false);
+    stageEl.focus({ preventScroll: true });
+    renderToolbar();
+    renderControls();
+  }
+
+  const isTyping = (e: KeyboardEvent): boolean => {
+    const t = e.target as HTMLElement | null;
+    return t !== null && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+  };
+
+  // Listened for on the document rather than the host: a panel rebuild
+  // removes whatever button had focus, which drops focus to <body>, and a
+  // shortcut that stops working after you press play is worse than none.
+  const onKeyDown = (e: KeyboardEvent): void => {
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && !host.contains(active)) return;
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key === 'z' && !e.shiftKey) {
+        if (isTyping(e)) return; // leave a text field its own undo
+        e.preventDefault();
+        state.undo();
+        renderAll();
+      } else if (e.key === 'y' || (e.key === 'Z' && e.shiftKey) || (e.key === 'z' && e.shiftKey)) {
+        if (isTyping(e)) return;
+        e.preventDefault();
+        state.redo();
+        renderAll();
+      } else if (e.key === 'd' && !isTyping(e)) {
+        e.preventDefault();
+        duplicateSelected();
+      }
+      return;
+    }
+    if (e.altKey || isTyping(e)) return;
+
     if (e.key === 'Escape') {
-      placing = null;
-      state.select(null);
-      renderAll();
-    } else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedId !== null) {
+      if (gesture || pick || tool !== 'select') setTool('select');
+      else {
+        state.select(null);
+        renderAll();
+      }
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedId !== null) {
       e.preventDefault();
       removeSelected();
-    } else if (e.key === '0') {
-      stage.camera.pan = { x: 0, y: 0 };
-      resize();
+      return;
     }
-  });
-
-  host.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (!(e.ctrlKey || e.metaKey)) return;
-    if (e.key === 'z' && !e.shiftKey) {
+    if (e.key === ' ' && (e.target === stageEl || e.target === document.body)) {
       e.preventDefault();
-      state.undo();
-      renderAll();
-    } else if (e.key === 'y' || (e.key === 'z' && e.shiftKey)) {
-      e.preventDefault();
-      state.redo();
-      renderAll();
+      state.setPlaying(!state.playing);
+      renderControls();
+      return;
     }
-  });
+    if (e.key === 'f' || e.key === '0') {
+      refit();
+      return;
+    }
+    const spec = TOOLS.find((t) => t.key === e.key.toLowerCase());
+    if (spec) {
+      e.preventDefault();
+      setTool(spec.tool);
+    }
+  };
+  document.addEventListener('keydown', onKeyDown);
 
-  /* ---- adding and removing -------------------------------------------- */
+  /* ---- making things -------------------------------------------------- */
 
-  /**
-   * Put a new object where the pointer went down, attached to whatever was
-   * under it.
-   *
-   * Clicking on an existing object attaches to it by reference rather than
-   * copying its coordinates, which is the difference between a figure that
-   * holds together when something moves and one that comes apart. Clicking on
-   * empty space gives a fixed point instead, since there is nothing to attach
-   * to and a loose point is what was asked for.
-   */
-  function place(kind: ObjectKind, screen: Vec): void {
-    const hit = state.fig.scene.hitTest(screen, { f: state.frame(), ref: state.fig.ref, camera: stage.camera });
-    const attachable = hit !== null && POSITIONED_KINDS.includes(hit.kind as ObjectKind) ? hit.id : null;
-    const world = worldAt(screen);
-    const anchor = attachable !== null ? { ref: attachable } : { x: round(world.x), y: round(world.y) };
-    const id = uniqueId(state.doc, kind);
-    const obj = newObject(kind, id, anchor, world);
+  const nameOf = (id: string | null): string => state.doc.objects.find((o) => o.id === id)?.name || (id ?? '');
+  /** a name as it reads mid-sentence: "Line from the earth", not "from The earth" */
+  const inline = (id: string | null): string => nameOf(id).replace(/^The /, 'the ');
+  const kindOf = (id: string | null): ObjectKind | undefined => state.doc.objects.find((o) => o.id === id)?.kind;
+  /** a snap as a place: the object itself, a sphere's centre as the live
+   * expression it is, or a fixed point on the ring */
+  const pointOf = (s: Snap): PointValue =>
+    s.kind === 'object' && s.id !== null
+      ? { ref: s.id }
+      : s.kind === 'centre' && s.id !== null
+        ? { expr: `${varName(s.id)}.centerAt(f)` }
+        : { x: round(s.world.x), y: round(s.world.y) };
+  const bearing = (from: Vec, to: Vec): number => Math.round(norm360(lonOf(sub(to, from)))) % 360;
+  const dist = (a: Vec, b: Vec): number => Math.hypot(b.x - a.x, b.y - a.y);
+  /** a length that looks like `px` on screen right now, in world px */
+  const onScreen = (px: number): number => Math.max(1, Math.round(px / stage.camera.zoom));
+  /** the object the camera holds still, when there is one — the natural
+   * "from" for a sightline and "centre" for a reading */
+  const viewRef = (): string | null => {
+    const id = state.doc.view.refId;
+    return id !== undefined && state.doc.objects.some((o) => o.id === id) ? id : null;
+  };
+  const fmt = (n: number): string => String(Math.round(n * 100) / 100);
+
+  /** What each tool needs, said when a press lands on nothing. */
+  const NEEDS: Partial<Record<ObjectKind, string>> = {
+    sphere: 'a sphere is centred on something: the earth, a body, or another sphere’s centre.',
+    connector: 'a line runs between objects, or from one toward a longitude on the ring.',
+    angle: 'an angle is seen from an object, toward objects or longitudes on the ring.',
+    anchor: 'a point marks a body, a sphere’s centre, or a longitude on the ring.',
+    trail: 'a trail follows a body — click one.',
+    ringmarker: 'a reading is of a body — click one.',
+  };
+
+  /** A press with a tool out. The one-click tools make their object here;
+   * the others start (or advance) a gesture. */
+  function toolDown(kind: ObjectKind, p: Vec): void {
+    // the second click of a two-click sphere sets its radius, which may be
+    // anywhere — it is a distance, not a place
+    if (gesture && gesture.tool === 'sphere' && gesture.down === null) {
+      const g = gesture;
+      gesture = null;
+      finishGesture(g, p);
+      return;
+    }
+
+    const snap = snapAt(p);
+    if (!snap) {
+      say(`Nothing to attach to there — ${NEEDS[kind] ?? ''}`);
+      return;
+    }
+    switch (kind) {
+      case 'anchor':
+        add(pointFrom(snap));
+        break;
+      case 'trail':
+        add(trailFrom(snap));
+        break;
+      case 'ringmarker':
+        add(readingFrom(snap));
+        break;
+      case 'sphere':
+        gesture = { tool: kind, snaps: [snap], down: p };
+        break;
+      case 'connector':
+        if (!gesture) gesture = { tool: kind, snaps: [snap], down: p };
+        else {
+          const g = gesture;
+          gesture = null;
+          const [start] = g.snaps;
+          if (start) add(lineFrom(start, snap));
+        }
+        break;
+      case 'angle':
+        if (!gesture) gesture = { tool: 'angle', snaps: [snap], down: null };
+        else {
+          gesture.snaps.push(snap);
+          const [v, a, b] = gesture.snaps;
+          if (v && a && b) {
+            gesture = null;
+            add(angleFrom(v, a, b));
+          }
+        }
+        break;
+    }
+  }
+
+  /** A drag tool let go, or a two-click tool clicked the second time. */
+  function finishGesture(g: Gesture, screen: Vec): void {
+    const start = g.snaps[0];
+    if (!start) return;
+    if (g.tool === 'sphere') {
+      add(sphereFrom(start, sphereRadius(start, screen).value));
+    } else if (g.tool === 'connector') {
+      const end = snapAt(screen, ['object', 'centre', 'ring']);
+      if (!end || (end.kind === start.kind && end.id === start.id)) {
+        say(`Nothing to attach to there — ${NEEDS.connector}`);
+        return;
+      }
+      add(lineFrom(start, end));
+    }
+  }
+
+  function add(obj: ObjectDoc): void {
+    // Born with a real name ("the earth to the moon"), it gets an id from it,
+    // so the emitted source says `earthToTheMoon`, not `connector1`.
+    if (obj.name !== defaultName(obj.kind, obj.id)) {
+      const id = idFromName(obj.name, new Set(state.doc.objects.map((o) => o.id)));
+      if (id !== null) obj.id = id;
+    }
     state.edit((d) => {
       d.objects.push(obj);
-    }, { label: `add ${kind}` });
-    state.select(id);
+    }, { label: `add ${obj.kind}` });
+    state.select(obj.id);
     panel = 'object';
+    tool = 'select';
+    gesture = null;
+    renderAll();
+  }
+
+  function pointFrom(s: Snap): ObjectDoc {
+    const id = uniqueId(state.doc, 'anchor');
+    const name =
+      s.kind === 'ring' ? formatLongitude(s.lon ?? 0) : s.kind === 'centre' ? `${nameOf(s.id)}’s centre` : `Point on ${inline(s.id)}`;
+    return { kind: 'anchor', id, name, marker: 'cross', at: pointOf(s) };
+  }
+
+  function sphereFrom(center: Snap, radius: number | null): ObjectDoc {
+    const id = uniqueId(state.doc, 'sphere');
+    // Pressed on a body: this sphere rides it — an epicycle. Smaller and
+    // quicker by default, since that is what an epicycle nearly always is.
+    const epicycle = center.kind === 'object' && kindOf(center.id) === 'sphere';
+    return {
+      kind: 'sphere',
+      id,
+      name: epicycle ? `Epicycle on ${inline(center.id)}` : defaultName('sphere', id),
+      center: pointOf(center),
+      radius: radius ?? onScreen(epicycle ? 22 : 70),
+      speed: epicycle ? 90 : 30,
+    };
+  }
+
+  function lineFrom(start: Snap, end: Snap): ObjectDoc {
+    const id = uniqueId(state.doc, 'connector');
+    if (end.kind === 'ring') {
+      // A sightline: from something, toward a longitude, out to the ring —
+      // dashed, this kit's convention for a direction rather than a route.
+      return {
+        kind: 'connector',
+        id,
+        name: `Toward ${formatLongitude(end.lon ?? 0)}`,
+        from: pointOf(start),
+        toward: end.lon ?? 0,
+        length: state.doc.zodiac !== false ? { expr: 'ringOuter(f)' } : round(dist(start.world, end.world)),
+        dashed: true,
+      };
+    }
+    // Joined: a line between two things, which follows both.
+    return {
+      kind: 'connector',
+      id,
+      name: `${nameOf(start.id) || start.name} to ${inline(end.id) || end.name}`,
+      from: pointOf(start),
+      to: pointOf(end),
+      shorten: 6,
+    };
+  }
+
+  function angleFrom(vertex: Snap, a: Snap, b: Snap): ObjectDoc {
+    const id = uniqueId(state.doc, 'angle');
+    // An arm on an object follows it; one on the ring points at that
+    // longitude — the sky at infinity, the same from any vertex.
+    const arm = (s: Snap): DirValue =>
+      s.kind === 'object' && s.id !== null && s.id !== vertex.id ? { ref: s.id } : s.kind === 'ring' ? (s.lon ?? 0) : bearing(vertex.world, s.world);
+    const reach = Math.min(dist(vertex.world, a.world), dist(vertex.world, b.world));
+    return {
+      kind: 'angle',
+      id,
+      name: `${a.kind === 'ring' ? a.name.replace(/ on the ring$/, '') : nameOf(a.id)} – ${b.kind === 'ring' ? b.name.replace(/ on the ring$/, '') : inline(b.id)}`,
+      vertex: pointOf(vertex),
+      from: arm(a),
+      to: arm(b),
+      radius: Math.max(onScreen(14), Math.round(reach * 0.35)),
+      short: true,
+      showValue: true,
+    };
+  }
+
+  function trailFrom(s: Snap): ObjectDoc {
+    const id = uniqueId(state.doc, 'trail');
+    const ref = viewRef();
+    return {
+      kind: 'trail',
+      id,
+      name: `${nameOf(s.id)}’s trail`,
+      target: pointOf(s),
+      ...(ref !== null && ref !== s.id ? { relativeTo: { ref } } : {}),
+      span: 5,
+      step: 0.05,
+      bands: 8,
+    };
+  }
+
+  function readingFrom(s: Snap): ObjectDoc {
+    const id = uniqueId(state.doc, 'ringmarker');
+    const ref = viewRef();
+    const center = ref !== null ? (snapOf(ref)?.world ?? { x: 0, y: 0 }) : { x: 0, y: 0 };
+    const target = s.id !== ref ? s : null;
+    return {
+      kind: 'ringmarker',
+      id,
+      name: target ? `${nameOf(target.id)} on the ring` : defaultName('ringmarker', id),
+      ...(ref !== null ? { center: { ref } } : {}),
+      // on the ring when there is one, so the mark sits on the circle drawn
+      radius: state.doc.zodiac !== false ? { expr: 'ringRadius(f)' } : Math.max(onScreen(40), Math.round(dist(center, s.world) * 1.25)),
+      toward: target && target.id !== null ? { ref: target.id } : bearing(center, s.world),
+    };
+  }
+
+  /** "Build on it" — the things one most often adds to whatever is selected,
+   * one click each. */
+  function quickActions(o: ObjectDoc): QuickAction[] {
+    const here = snapOf(o.id);
+    if (!here) return [];
+    const item = state.fig.items.get(o.id);
+    const out: QuickAction[] = [];
+    if (item instanceof Sphere && o.kind === 'sphere' && (o.eccentric !== undefined || (o.center !== undefined && !isRef(o.center)))) {
+      const c: Snap = { kind: 'centre', id: o.id, world: item.centerAt(state.frame()), name: `centre of ${inline(o.id)}` };
+      out.push({ label: '✛ Mark its centre', title: 'A named point at this sphere’s own centre', run: () => add(pointFrom(c)) });
+    }
+    const hasBody = item instanceof Sphere ? item.showBody : true;
+    if (!hasBody) return out;
+    const ref = viewRef();
+    out.push({
+      label: o.kind === 'sphere' ? '◯ Epicycle on it' : '◯ Sphere round it',
+      title: 'A new sphere centred on this, which goes wherever it goes',
+      run: () => add(sphereFrom(here, null)),
+    });
+    if (ref !== null && ref !== o.id) {
+      const from = snapOf(ref);
+      if (from) {
+        out.push({
+          label: `╱ Line from ${inline(ref)}`,
+          title: `A line from ${inline(ref)} to this, following both`,
+          run: () => add(lineFrom(from, here)),
+        });
+      }
+    }
+    if (o.kind === 'sphere') {
+      out.push({ label: '⋰ Trail it', title: 'Draw where it has been', run: () => add(trailFrom(here)) });
+    }
+    if (o.kind !== 'ringmarker' && o.id !== ref) {
+      out.push({
+        label: '⊙ Read it on the ring',
+        title: 'Mark the longitude it is seen at',
+        run: () => add(readingFrom(here)),
+      });
+    }
+    return out;
+  }
+
+  function startPick(id: string, path: string, label: string, accepts: 'point' | 'dir'): void {
+    tool = 'select';
+    gesture = null;
+    pick = { id, path, label, accepts };
+    state.setPlaying(false);
+    stageEl.focus({ preventScroll: true });
+    renderToolbar();
+  }
+
+  function completePick(s: Snap): void {
+    const p = pick;
+    if (!p) return;
+    if (s.kind === 'object' && s.id === p.id) {
+      say('It can’t refer to itself — click something else.');
+      return;
+    }
+    const value: PointValue | DirValue =
+      p.accepts === 'point' ? pointOf(s) : s.kind === 'ring' ? (s.lon ?? 0) : { ref: s.id as string };
+    pick = null;
+    state.edit((d) => {
+      const target = d.objects.find((x) => x.id === p.id);
+      if (!target) return false;
+      setPath(target as unknown as Record<string, unknown>, p.path, value);
+    }, { label: `set ${p.path}` });
     renderAll();
   }
 
@@ -458,6 +1184,7 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
       el('input', {
         class: 'cdx-title',
         type: 'text',
+        'data-fkey': 'doc:title',
         value: state.doc.name,
         title: 'What this figure is called',
         oninput: (e: Event) =>
@@ -465,29 +1192,37 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
             d.name = (e.target as HTMLInputElement).value;
           }, { label: 'name', coalesce: 'doc:name' }),
       }),
-      el('span', { class: 'cdx-spacer' }),
-      select(
-        [{ value: '', label: '+ add…' }, ...OBJECT_KINDS.map((k) => ({ value: k, label: KIND_LABELS[k] }))],
-        '',
-        (v) => {
-          if (v === '') return;
-          placing = v as ObjectKind;
-          stageEl.focus({ preventScroll: true });
-          renderToolbar();
-        },
-        { class: 'cdx-add-menu', title: 'Add an object, then click in the figure to place it' },
+      el('div', { class: 'cdx-tools', role: 'toolbar', 'aria-label': 'Tools' },
+        ...TOOLS.map((t) =>
+          el('button', {
+            type: 'button',
+            class: `cdx-tool${tool === t.tool ? ' is-on' : ''}`,
+            'aria-pressed': tool === t.tool ? 'true' : 'false',
+            title: `${t.label} (${t.key.toUpperCase()})${t.steps[0] ? ` — ${t.steps[0]}` : ''}`,
+            onclick: () => setTool(tool === t.tool ? 'select' : t.tool),
+          },
+            el('span', { class: 'cdx-tool-icon', text: t.icon }),
+            el('span', { text: t.label }),
+          ),
+        ),
       ),
-      el('button', { type: 'button', text: 'Duplicate', disabled: state.selectedId === null, onclick: duplicateSelected }),
-      el('button', { type: 'button', text: 'Remove', disabled: state.selectedId === null, onclick: removeSelected }),
+      el('button', {
+        type: 'button',
+        class: `cdx-toggle${state.doc.zodiac !== false ? ' is-on' : ''}`,
+        'aria-pressed': state.doc.zodiac !== false ? 'true' : 'false',
+        text: '✦ Mazalot',
+        title: 'The ring of the twelve signs round the figure — what longitudes are read against, and what lines and angles can point at. More in Figure.',
+        onclick: toggleMazalot,
+      }),
       el('span', { class: 'cdx-spacer' }),
       el('button', { type: 'button', text: '↶', title: 'Undo (Ctrl+Z)', disabled: !state.canUndo(), onclick: () => { state.undo(); renderAll(); } }),
       el('button', { type: 'button', text: '↷', title: 'Redo (Ctrl+Shift+Z)', disabled: !state.canRedo(), onclick: () => { state.redo(); renderAll(); } }),
       el('span', { class: 'cdx-spacer' }),
-      el('button', { type: 'button', text: 'Code', title: 'The TypeScript this figure emits as', onclick: () => showCode() }),
+      el('button', { type: 'button', class: 'cdx-primary', text: 'Code', title: 'The component this figure emits as', onclick: () => showCode() }),
       el('button', { type: 'button', text: 'JSON', title: 'Save or load this figure as a document', onclick: () => showJson() }),
       ...(opts.examples && opts.examples.length > 0
         ? [select(
-            [{ value: '', label: 'Open…' }, ...opts.examples.map((x, i) => ({ value: String(i), label: x.name }))],
+            [{ value: '', label: 'Open example…' }, ...opts.examples.map((x, i) => ({ value: String(i), label: x.name }))],
             '',
             (v) => {
               if (v === '') return;
@@ -499,15 +1234,40 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
             },
           )]
         : []),
-      el('button', { type: 'button', text: 'New', onclick: () => { state.load(emptyDoc(), 'new'); renderAll(); } }),
+      select(
+        [
+          { value: '', label: 'New…' },
+          { value: 'earth', label: 'About the earth (the Rambam)' },
+          { value: 'sun', label: 'About the sun (modern)' },
+        ],
+        '',
+        (v) => {
+          if (v === '') return;
+          state.load(v === 'sun' ? sunCentred() : earthCentred(), 'new');
+          renderAll();
+        },
+        { title: 'Start a new figure' },
+      ),
     );
+  }
+
+  /** The mazalot ring, on or off — sized to the figure, and the view re-fitted
+   * to take it in. */
+  function toggleMazalot(): void {
+    const on = state.doc.zodiac !== false;
+    state.edit((d) => {
+      d.zodiac = on
+        ? false
+        : { radius: 'auto', padding: 22, band: 20, segments: MAZALOT.map((m) => ({ ...m })), language: 'en' };
+    }, { label: on ? 'remove the mazalot ring' : 'add the mazalot ring' });
+    refitNext = true;
   }
 
   function renderList(): void {
     clear(listPanel);
     listPanel.appendChild(el('h4', { class: 'cdx-group', text: 'In this figure' }));
     if (state.doc.objects.length === 0) {
-      listPanel.appendChild(el('p', { class: 'cdx-empty', text: 'Nothing yet. Add something above, then click in the figure to place it.' }));
+      listPanel.appendChild(el('p', { class: 'cdx-empty', text: 'Nothing yet. Pick a tool above and draw.' }));
     }
     for (const [i, o] of state.doc.objects.entries()) {
       const isSelected = o.id === state.selectedId;
@@ -535,7 +1295,38 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
     renderAll();
   }
 
+  /** What the panel says before anything is selected: how to start. */
+  function gettingStarted(): HTMLElement {
+    const line = (icon: string, what: string, how: string): HTMLElement =>
+      el('li', {}, el('span', { class: 'cdx-tool-icon', text: icon }), el('span', {}, el('strong', { text: what }), ` — ${how}`));
+    return el('div', { class: 'cdx-start' },
+      el('p', { text: 'Draw with the tools above. Every press attaches to something — a body, a point, a sphere’s centre, or a degree of the ring — and follows it when it moves.' }),
+      el('ul', {},
+        line('◯', 'Sphere (S)', 'press on the earth and drag out the radius. Press on a body instead for an epicycle, or on a sphere’s centre.'),
+        line('╱', 'Line (L)', 'drag from one object to another — or to a degree of the mazalot ring, for a sightline.'),
+        line('∠', 'Angle (A)', 'click the vertex, then the two things it lies between — objects, or degrees of the ring.'),
+        line('⋰', 'Trail (T) · ⊙ Reading (R)', 'click a body.'),
+        line('✦', 'Mazalot', 'the ring of signs, for readings, sightlines and angles to a longitude.'),
+      ),
+      el('p', { text: 'Then set exact values in the panel, as your source gives them: 13°10′35″ a day, 26°45′ Gemini, 2;30 parts of 60 — or 27.32 days, 0.0417.' }),
+      el('p', { text: 'Click anything to edit it, and drag its handles to reshape it. Space runs the clock, F fits the view, Esc puts a tool down.' }),
+    );
+  }
+
   function renderPanel(): void {
+    // A rebuild must not throw the panel back to its top: committing a value
+    // halfway down would otherwise lose your place every time.
+    const scrolled = panelBody.scrollTop;
+    const sameObject = panelFor === `${panel}:${state.selectedId ?? ''}`;
+    panelFor = `${panel}:${state.selectedId ?? ''}`;
+    renderPanelBody();
+    if (sameObject) panelBody.scrollTop = scrolled;
+  }
+
+  /** what the panel was last built for — its scroll is kept only while that holds */
+  let panelFor = '';
+
+  function renderPanelBody(): void {
     clear(panelTabs);
     for (const [key, label] of [['object', 'Selected'], ['figure', 'Figure']] as const) {
       panelTabs.appendChild(
@@ -550,8 +1341,27 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
         }),
       );
     }
-    if (panel === 'object') renderInspector(panelBody, state);
-    else renderFigurePanel(panelBody, state);
+    if (panel === 'object') {
+      const o = state.selected();
+      renderInspector(panelBody, state, {
+        actions: [
+          ...(o ? quickActions(o) : []),
+          ...(o
+            ? [
+                { label: 'Duplicate', title: 'A copy of it (Ctrl+D)', run: duplicateSelected },
+                { label: 'Delete', title: 'Remove it (Delete)', run: removeSelected },
+              ]
+            : []),
+        ],
+        startPick,
+        empty: gettingStarted(),
+      });
+    } else {
+      renderFigurePanel(panelBody, state);
+      for (const [i, field] of panelBody.querySelectorAll<HTMLElement>('input, select, textarea').entries()) {
+        field.dataset['fkey'] ??= `figure:${i}`;
+      }
+    }
   }
 
   const clockLabel = el('span', { class: 'cdx-clocklabel' });
@@ -563,7 +1373,7 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
       type: 'button',
       class: 'cdx-play',
       text: state.playing ? '❚❚' : '▶',
-      title: state.playing ? 'Pause the clock' : 'Run the clock',
+      title: state.playing ? 'Pause the clock (Space)' : 'Run the clock (Space)',
       onclick: () => {
         state.setPlaying(!state.playing);
         renderControls();
@@ -602,6 +1412,9 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
         ),
       );
     }
+    controlsEl.appendChild(
+      el('button', { type: 'button', text: 'Fit', title: 'Fit the view to the figure (F)', onclick: () => refit() }),
+    );
   }
 
   function renderClockReadout(): void {
@@ -633,12 +1446,37 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
     }
   }
 
+  /**
+   * Rebuild every panel from the state — and hand focus back to whatever
+   * field had it. Every edit rebuilds, including the one each keystroke in a
+   * text field makes, so without this a field keeps its focus for exactly one
+   * character. Fields are found again by `data-fkey`; the ones built without
+   * one (the figure panel's) are keyed by their order, which a keystroke does
+   * not change.
+   */
   function renderAll(): void {
+    const active = document.activeElement;
+    const key = active instanceof HTMLElement && host.contains(active) ? active.dataset['fkey'] : undefined;
+    const caret =
+      active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active.selectionStart : null;
+
     renderToolbar();
     renderList();
     renderPanel();
     renderControls();
     renderProblems();
+
+    if (key === undefined || document.activeElement === active) return;
+    const again = host.querySelector<HTMLElement>(`[data-fkey="${CSS.escape(key)}"]`);
+    if (!again) return;
+    again.focus({ preventScroll: true });
+    if (caret !== null && (again instanceof HTMLInputElement || again instanceof HTMLTextAreaElement)) {
+      try {
+        again.setSelectionRange(caret, caret);
+      } catch {
+        // some input types refuse a selection; the focus is what matters
+      }
+    }
   }
 
   /* ---- drawers -------------------------------------------------------- */
@@ -658,14 +1496,44 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
   }
 
   function showCode(): void {
-    const emitted = emitDocument(state.doc, opts.emit ?? {});
-    const area = el('textarea', { class: 'cdx-code', spellcheck: 'false', readonly: true, text: emitted.code });
-    showDrawer(emitted.filename, area, [
-      el('button', { type: 'button', text: 'Copy', onclick: () => { void navigator.clipboard?.writeText(emitted.code); } }),
+    let target: 'component' | 'scene' = 'component';
+    const area = el('textarea', { class: 'cdx-code', spellcheck: 'false', readonly: true });
+    const title = el('strong', {});
+    const fill = (): void => {
+      const emitted = emitDocument(state.doc, { ...(opts.emit ?? {}), target });
+      area.value = emitted.code;
+      title.textContent = emitted.filename;
+    };
+    fill();
+    const copyBtn = el('button', {
+      type: 'button',
+      text: 'Copy',
+      onclick: () => {
+        void navigator.clipboard?.writeText(area.value).then(() => {
+          copyBtn.textContent = 'Copied';
+          setTimeout(() => (copyBtn.textContent = 'Copy'), 1200);
+        });
+      },
+    });
+    showDrawer('', area, [
+      title,
+      select(
+        [
+          { value: 'component', label: 'a whole component' },
+          { value: 'scene', label: 'the declarations only' },
+        ],
+        target,
+        (v) => {
+          target = v as 'component' | 'scene';
+          fill();
+        },
+        { title: 'A complete .astro component, or just the objects to paste into a figure of your own' },
+      ),
+      copyBtn,
       el('button', {
         type: 'button',
         text: 'Download',
-        onclick: () => download(emitted.filename, emitted.code, 'text/plain'),
+        onclick: () => download(title.textContent ?? 'Figure.astro', area.value, 'text/plain'),
       }),
     ]);
   }
@@ -715,6 +1583,7 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
     doc: () => state.doc,
     destroy(): void {
       cancelAnimationFrame(raf);
+      document.removeEventListener('keydown', onKeyDown);
       unsubscribe();
       unwireResize();
       stage.destroy();
@@ -725,46 +1594,36 @@ export function mountEditor(host: HTMLElement, opts: EditorOptions = {}): Editor
 }
 
 /* -------------------------------------------------------------------------
- * New objects
+ * Starting points
  * ---------------------------------------------------------------------- */
 
-/**
- * A newly placed object, already sensible.
- *
- * The defaults matter more here than they look. An object that appears as
- * nothing — a sphere of radius zero, a connector with no end — teaches you
- * only that the button did something. Each of these arrives visible, named,
- * and attached to whatever it was dropped on, so the next thing you do is
- * adjust it rather than assemble it.
- */
-function newObject(
-  kind: ObjectKind,
-  id: string,
-  anchor: { ref: string } | { x: number; y: number },
-  world: Vec,
-): ObjectDoc {
-  // The name takes its number from the id rather than counting what is already
-  // there, so a new object is never called "Sphere 3" while its id is
-  // `sphere-1` — two numbers for one thing, disagreeing at first sight.
-  const name = `${KIND_LABELS[kind]} ${id.slice(kind.length + 1)}`;
-  // How far the click was from the origin: a reasonable size for something
-  // dropped there, so a sphere placed out near the ring is not born tiny.
-  const reach = Math.max(30, Math.round(Math.hypot(world.x, world.y)));
+/** The Rambam's world: the earth at the centre, the mazalot round the edge,
+ * and a clock that counts days from his epoch. */
+function earthCentred(): DiagramDoc {
+  const doc = emptyDoc();
+  doc.clock = { ...doc.clock, unit: 'days', running: true };
+  doc.zodiac = { radius: 'auto', padding: 22, band: 20, segments: MAZALOT.map((m) => ({ ...m })), language: 'en' };
+  return doc;
+}
 
-  switch (kind) {
-    case 'anchor':
-      return { kind, id, name, marker: 'cross', ...('ref' in anchor ? { at: anchor } : { at: anchor }) };
-    case 'sphere':
-      return { kind, id, name, center: anchor, radius: reach, speed: 30, markCenter: false };
-    case 'connector':
-      return { kind, id, name, from: anchor, toward: 0, length: reach, dashed: true };
-    case 'angle':
-      return { kind, id, name, vertex: anchor, from: 0, to: 60, radius: Math.round(reach * 0.4), short: true, showValue: true };
-    case 'trail':
-      return { kind, id, name, target: anchor, span: 5, step: 0.05, bands: 8 };
-    case 'ringmarker':
-      return { kind, id, name, center: anchor, radius: reach, toward: 0, style: 'solid' };
-  }
+/** The modern arrangement: the sun at the centre, and a clock quick enough
+ * that the outer planets are seen to move. */
+function sunCentred(): DiagramDoc {
+  const doc = emptyDoc();
+  doc.objects = [centralSun()];
+  doc.view = { fitRadius: 'auto', refId: 'sun', lightId: 'sun' };
+  doc.clock = { ...doc.clock, unit: 'days', speed: 30, scrub: 12000, running: true };
+  return doc;
+}
+
+/* -------------------------------------------------------------------------
+ * Helpers
+ * ---------------------------------------------------------------------- */
+
+/** "Sphere 2" for `sphere-2` — the name takes its number from the id rather
+ * than counting what is already there, so the two never disagree. */
+function defaultName(kind: ObjectKind, id: string): string {
+  return `${KIND_LABELS[kind]} ${id.slice(kind.length + 1)}`;
 }
 
 function uniqueId(doc: DiagramDoc, kind: ObjectKind): string {
@@ -775,6 +1634,8 @@ function uniqueId(doc: DiagramDoc, kind: ObjectKind): string {
   }
 }
 
+/** World px to a tenth — a drag produces a float per pixel of travel, and a
+ * document full of `33.99999999999999` is one nobody wants to diff. */
 function round(n: number): number {
   return Math.round(n * 10) / 10;
 }

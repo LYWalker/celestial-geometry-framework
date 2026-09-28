@@ -5,7 +5,7 @@ import { Anchor } from '../canvas-diagram/scene/anchor.js';
 import { frame } from '../canvas-diagram/scene/types.js';
 import { compileDoc, varName } from '../canvas-diagram/editor/compile.js';
 import { emitScene, emitDocument } from '../canvas-diagram/editor/emit.js';
-import { emptyDoc, parseDoc, serializeDoc, validateDoc, type DiagramDoc } from '../canvas-diagram/editor/doc.js';
+import { emptyDoc, idFromName, parseDoc, serializeDoc, validateDoc, type DiagramDoc } from '../canvas-diagram/editor/doc.js';
 import { Env } from '../canvas-diagram/editor/expr.js';
 import { deletePath, EditorState, getPath, setPath } from '../canvas-diagram/editor/state.js';
 import { handlesFor } from '../canvas-diagram/editor/handles.js';
@@ -13,6 +13,8 @@ import { demoFigure } from '../canvas-diagram/editor/examples/demo.js';
 import { inclinationFigure } from '../canvas-diagram/editor/examples/inclination.js';
 import { orreryFigure } from '../canvas-diagram/editor/examples/orrery.js';
 import { near } from './helpers/near.js';
+import { BODIES } from '../canvas-diagram/editor/bodies.js';
+import { getRenderer } from '../canvas-diagram/editor/renderers.js';
 
 /** A minimal figure: an earth, and a sphere turning about it. */
 function twoObjects(): DiagramDoc {
@@ -295,6 +297,54 @@ describe('emitting TypeScript', () => {
     assert.match(code, /shells: number;/);
     // the expression reads exactly as it was typed in the editor
     assert.match(code, /on\(\(f\) => f\.shells \* 0\.9\)/);
+    // and the wrapper is spelled so Astro's compiler does not take `<T>(` for a tag
+    assert.match(code, /const on = <T,>\(/);
+    assert.doesNotMatch(code, /<T>\(/);
+  });
+
+  test('a component is the figure and one mount call, not a page of wiring', () => {
+    const code = emitDocument(twoObjects(), { target: 'component' }).code;
+    assert.match(code, /mountAll\('\[data-untitled-figure\]'/);
+    assert.match(code, /return mountFigure\(root, \{/);
+    assert.match(code, /ref: earth,/);
+    for (const plumbing of ['wireCamera', 'wireResize', 'wireAnimationLoop', 'HoverController', 'new Stage']) {
+      assert.doesNotMatch(code, new RegExp(plumbing), `${plumbing} is mountFigure's business now`);
+    }
+  });
+
+  test('only the parts of the theme that differ from the house style are written out', () => {
+    const plain = emitDocument(twoObjects(), { target: 'component' }).code;
+    assert.doesNotMatch(plain, /theme:/);
+    assert.doesNotMatch(plain, /background:/);
+    const doc = twoObjects();
+    doc.theme.ring = '#123456';
+    const themed = emitDocument(doc, { target: 'component' }).code;
+    assert.match(themed, /theme: \{\n\s+ring: '#123456',\n\s+\}/);
+    assert.doesNotMatch(themed, /activeFont/);
+  });
+
+  test('a motion given in degrees, minutes and seconds is written back that way, exactly', () => {
+    const doc = twoObjects();
+    const sun = doc.objects[1]!;
+    if (sun.kind !== 'sphere') throw new Error('fixture');
+    sun.speed = 13 + 10 / 60 + 35 / 3600;
+    sun.phase = 30 + 1 + 14 / 60 + 43 / 3600;
+    sun.countFrom = 'carrier';
+    sun.clockwise = true;
+    const code = emitScene(doc);
+    assert.match(code, /speed: 13 \+ 10 \/ 60 \+ 35 \/ 3600, \/\/ 13°10′35″ a day/);
+    assert.match(code, /countFrom: 'carrier',/);
+    assert.match(code, /clockwise: true,/);
+    // a number that is not a whole number of seconds stays a decimal, unrounded
+    sun.speed = 0.98564733;
+    assert.match(emitScene(doc), /speed: 0\.98564733,/);
+  });
+
+  test('an id is made from a name, without its "the", and kept unique', () => {
+    assert.equal(idFromName('the large sphere', new Set()), 'large-sphere');
+    assert.equal(idFromName('The moon’s epicycle', new Set()), 'moons-epicycle');
+    assert.equal(idFromName('the moon', new Set(['moon'])), 'moon-2');
+    assert.equal(idFromName('   ', new Set()), null);
   });
 
   test('an id becomes the same variable name the editor puts in scope', () => {
@@ -306,6 +356,29 @@ describe('emitting TypeScript', () => {
 });
 
 describe('editing', () => {
+  test('the editor opens paused, whatever the figure does once it is published', () => {
+    // a body that moves while you try to click it, or attach to it, is the
+    // first thing that makes an editor feel broken
+    const doc = twoObjects();
+    doc.clock.running = true;
+    const state = new EditorState(doc);
+    assert.equal(state.playing, false);
+    state.setPlaying(true);
+    state.load(twoObjects());
+    assert.equal(state.playing, false);
+  });
+
+  test('loading a figure is counted, so the camera re-fits to a new figure and not to an edit', () => {
+    const state = new EditorState(twoObjects());
+    const before = state.loads;
+    state.edit((d) => {
+      d.name = 'renamed';
+    });
+    assert.equal(state.loads, before);
+    state.load(twoObjects());
+    assert.equal(state.loads, before + 1);
+  });
+
   test('an edit is undoable, and a run of them under one key is a single step', () => {
     const state = new EditorState(twoObjects());
     for (const r of [110, 120, 130]) {
@@ -446,4 +519,38 @@ describe('the worked examples — the baseline this editor is measured against',
       }
     });
   }
+});
+
+describe('the bodies', () => {
+  test('every known body has a name in both languages, a colour, and a renderer that exists', () => {
+    for (const b of BODIES) {
+      assert.ok(b.name && b.nameHe && /^#[0-9a-f]{6}$/i.test(b.color), b.key);
+      if (b.render !== undefined) assert.ok(getRenderer(b.render), `${b.key}: renderer ${b.render}`);
+    }
+  });
+
+  test('a point can be a body: it compiles, and emits with its renderer', () => {
+    const doc = emptyDoc();
+    const earth = doc.objects[0]!;
+    if (earth.kind !== 'anchor') throw new Error('fixture');
+    earth.body = 'earth';
+    earth.render = { ref: 'lit' };
+    assert.deepEqual(compileDoc(doc).problems, []);
+    const code = emitScene(doc);
+    assert.match(code, /render: renderers\.lit,/);
+    assert.match(code, /import \* as renderers from/);
+    assert.doesNotMatch(code, /body: 'earth'/);
+  });
+
+  test('which body a sphere carries is the editor’s note, and never reaches the emitted source', () => {
+    const doc = twoObjects();
+    const sun = doc.objects[1]!;
+    if (sun.kind !== 'sphere') throw new Error('fixture');
+    sun.body = 'sun';
+    sun.render = { ref: 'sun' };
+    const code = emitScene(doc);
+    assert.doesNotMatch(code, /body: 'sun'/);
+    assert.match(code, /render: renderers\.sun,/);
+    assert.deepEqual(compileDoc(doc).problems, []);
+  });
 });

@@ -42,41 +42,73 @@ scene layer is measured against (see below).
 
 ## Quickstart
 
-```ts
-import { Anchor, Sphere, Scene, Stage, HoverController, wireCamera, frame } from 'celestial-geometry-framework';
+A whole figure is its objects and one call:
 
-const earth = new Anchor({ id: 'earth', name: 'The earth', marker: 'cross' });
-const sunShell = new Sphere({
-  id: 'sun', name: 'The sun', nameHe: 'חמה', color: '#f0c14b',
-  center: earth, radius: 120, eccentric: { ratio: 0.09, direction: 65 },
-  speed: 360 / 365.25,
-});
-const scene = new Scene().add(earth).add(sunShell);
+```astro
+<figure data-sun-figure>
+  <figcaption>The sun's eccentric circle.</figcaption>
+</figure>
 
-const stage = new Stage({ canvas, background: { ... }, zodiac: { ... } });
-stage.resize({ fitRadius: 140 });
-const hover = new HoverController({ root: tipEl, text: tipTextEl, sub: tipSubEl });
-let pointer: Vec | null = null;
-const cleanup = wireCamera({
-  canvas, camera: stage.camera,
-  minZoom: () => stage.fit * 0.4, maxZoom: () => stage.fit * 40,
-  onChange: draw, onHover: (p) => { pointer = p; draw(); },
-});
+<script>
+  import { Anchor, MAZALOT, Scene, Sphere, mountAll, mountFigure } from 'celestial-geometry-framework';
 
-function draw() {
-  const f = frame(days); // or frame(days, { shellT, frameT }) for a diagram with UI-driven transitions
-  stage.render({ scene, f, ref: earth, theme, hover, pointer });
-}
+  mountAll('[data-sun-figure]', (root) => {
+    const earth = new Anchor({ id: 'earth', name: 'the earth', marker: 'crosshair' });
+    const sun = new Sphere({
+      id: 'sun', name: 'the sun', nameHe: 'חמה', color: '#e0b45c',
+      center: earth, radius: 100,
+      eccentric: { ratio: 2.5 / 60, direction: 60 + 26 + 45 / 60 }, // apogee 26°45′ Gemini
+      speed: 59 / 60 + 8 / 3600, // 0°59′8″ a day
+    });
+    return mountFigure(root, {
+      scene: new Scene().add(earth).add(sun),
+      ref: earth,
+      zodiac: { segments: MAZALOT },
+      label: "The sun's eccentric circle",
+    });
+  });
+</script>
 ```
 
-No step in defining `sunShell` did any trigonometry — radius, how far
-off-centre, and how fast it turns are the only numbers given, and
-`sunShell.position(f)` (what actually gets drawn and hovered) is derived.
+No step in defining `sun` did any trigonometry — radius, how far off-centre,
+and how fast it turns are the only numbers given, and `sun.position(f)` (what
+actually gets drawn and hovered) is derived.
 
-For a complete, running version of this pattern — including a fading
-`Trail`, a `measureFrom` epicycle, and a custom lit-body renderer — see
-`components/CanvasDiagramDemo.astro`, the worked example this kit is proved
-against.
+`mountFigure` is everything around the objects: the canvas and its hover
+tooltip, pan/zoom/keyboard camera, a fit that takes in the scene and its ring,
+the clock, a slider or toggle per `params` entry, the screen-reader list, and
+teardown. Only what differs from the house style needs saying — `theme` is a
+partial over `DEFAULT_THEME`, `background` defaults to `DEFAULT_BACKGROUND`.
+It returns a handle (`stage`, `hover`, `frame()`, `set(key, v)`, `play()`,
+`pause()`, `seek(t)`, `draw()`, `destroy()`) for a figure that needs to reach
+past it. `mountAll(selector, init)` finds every instance on the page, now and
+after each Astro navigation, and tears each down when its page goes.
+
+A figure that needs more control than that can still assemble the pieces by
+hand — `Stage`, `HoverController`, `wireCamera`, `wireResize`,
+`wireAnimationLoop` — which is how the figures in `components/` predating
+`mountFigure` are written, and what it does inside.
+
+### Stating motions the way the text does
+
+A sphere's `speed` is degrees per unit of the clock and `phase` its bearing at
+`t = 0`, anticlockwise from east. Two options let a source's numbers go in as
+it states them, with no conversion:
+
+- **`clockwise: true`** — `phase`/`speed` (or `angle`) are counted clockwise.
+  The moon runs its small sphere against the large one (KH 14:3); its course is
+  still a positive 13°3′54″ a day.
+- **`countFrom: 'carrier'`** — counted from the line the sphere it rides is
+  carrying it along (its carrier's `angleAt`), not from east. That is how the
+  course is reckoned: from the small sphere's far point.
+
+```ts
+const large = new Sphere({ id: 'large', name: 'the large sphere', center: earth, radius: 100,
+  speed: 13 + 10 / 60 + 35 / 3600, phase: 30 + 1 + 14 / 60 + 43 / 3600 });
+const moon = new Sphere({ id: 'moon', name: 'the moon', center: large, radius: 100 / 9,
+  speed: 13 + 3 / 60 + 54 / 3600, phase: 84 + 28 / 60 + 42 / 3600,
+  countFrom: 'carrier', clockwise: true });
+```
 
 ## Core concepts
 
@@ -207,9 +239,9 @@ trigonometry anywhere in its script. Start there when building a new figure.
 
 ## The editor
 
-`canvas-diagram/editor/` is an authoring tool for these figures: place objects
-by clicking, adjust them by dragging or by typing into a panel that explains
-each field as you use it, then take the result away as ordinary TypeScript.
+`canvas-diagram/editor/` is an authoring tool for these figures: draw them with
+tools, set their values exactly, then take the result away as ordinary
+TypeScript.
 
 ```ts
 import { mountEditor, EXAMPLES } from 'celestial-geometry-framework/editor';
@@ -224,6 +256,59 @@ mountEditor(document.querySelector('#editor')!, {
 
 `components/DiagramEditor.astro` is that call plus an element to put it in, and
 `/dev/diagram-editor` is the page it runs on in this repo.
+
+### Drawing: every press attaches to something
+
+The toolbar holds the tools (keys in brackets): Sphere (S), Line (L), Angle
+(A), Point (P), Trail (T), Reading (R), and a switch for the mazalot ring.
+
+A tool press only ever lands *on* something — a body or named point, a
+sphere's own centre, or a whole degree of the mazalot ring — never on empty
+space, since a point in empty space is a coordinate nobody can state. What a
+press would attach to is shown before it happens (a halo and its name), and
+what it attaches to becomes a reference, so the figure holds together as
+things move:
+
+- **Sphere** — press on what it is centred on, drag (or click) out the radius.
+  On a body it is an epicycle. The radius snaps through bodies and to spheres
+  sharing its centre; otherwise to a whole world px.
+- **Line** — from an object to another object; or to the ring, for a sightline
+  toward that longitude reaching out to it.
+- **Angle** — the vertex, then two arms: objects, or longitudes on the ring.
+- **Point · Trail · Reading** — one click on what they are of.
+
+A sphere's or a point's panel opens with **Its body** — what rides the
+sphere, or what the point is: none (a bare shell; a point's plain marker), one
+of the known bodies (the sun, the moon, Mercury … Saturn, the
+earth), which brings its name in both languages, its colour and its icon, or a
+custom body, named by hand and drawn with an icon picked from previews of each
+renderer. Only the look comes from the choice; how it moves is set exactly
+below it. **New…** starts a figure about the earth or about the sun. The
+known bodies are `editor/bodies.ts`.
+
+The selected object's panel opens with **Build on it** — an epicycle on it, a
+line from the earth, its trail, its reading on the ring — and every reference
+field has a **Pick** button: press it, click the target.
+
+### Values, exactly — in the source's own terms
+
+Drawing gets a figure roughly right; the panel makes it exact. Radius, motion,
+starting point, eccentricity and every bearing accept what the sources write,
+and say back what they understood in every other form:
+
+| field | type any of | reads back as |
+| --- | --- | --- |
+| motion | `13°10′35″` · `13 10 35` · `13;10,35` · `136°28′20″ per 10000 days` · `27.32 days` · `0.9856` | `13°10′35″ a day · 13.176389°/day · once round in 27.322 days` |
+| bearing / start | `26°45′8″ Gemini` · `Gemini 26;45,8` · `תאומים 26 45` · `86.75` | `26°45′8″ Gemini · 86°45′8″ from east` |
+| eccentricity | `2;30/60` · `10;19 / 49;41` · `1/9` · `4%` · `0.0417` | `2;30 parts of 60 · 4.167% of its radius` |
+| length | `100` · `100/9` | |
+
+Beside a motion, ↺/↻ sets which way it turns; under More options, "Its motion is
+counted from: carrier" states an epicycle's motion as the text does. Values
+commit on Enter or on leaving the field. Handle drags land on whole numbers
+(Shift for tenths), and the emitted source writes a value given in degrees,
+minutes and seconds back that way — `speed: 13 + 10 / 60 + 35 / 3600, // 13°10′35″ a day`
+— exactly, not rounded.
 
 ### It is three layers, and only the top one is a UI
 

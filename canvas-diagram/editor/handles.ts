@@ -47,8 +47,11 @@ export interface Handle {
    * sets an angle. Three shapes, so what a handle will do is legible before
    * it is touched. */
   shape: 'round' | 'square' | 'diamond';
-  /** apply a drag that has reached `world` */
-  drag(world: Vec, state: EditorState): void;
+  /** apply a drag that has reached `world`. Values land on whole numbers —
+   * whole world px, whole degrees, hundredths of a radius — so a dragged
+   * figure is as clean as a typed one; `fine` (Shift held) goes a place
+   * further for the rare value that sits between. */
+  drag(world: Vec, state: EditorState, fine?: boolean): void;
 }
 
 /** How close, in screen px, the pointer has to be to grab a handle. */
@@ -66,16 +69,18 @@ export function handlesFor(o: ObjectDoc, fig: CompiledFigure, f: Frame): Handle[
   if (!item) return [];
   const out: Handle[] = [];
 
-  const editNumber = (path: string, value: number, coalesce: string): ((state: EditorState) => void) =>
+  const editNumber = (path: string, value: number, coalesce: string, step = 1): ((state: EditorState) => void) =>
     (state: EditorState) =>
       state.edit(
         (doc) => {
           const target = doc.objects.find((x) => x.id === o.id);
           if (!target) return false;
-          setPath(target as unknown as Record<string, unknown>, path, round(value));
+          setPath(target as unknown as Record<string, unknown>, path, snapTo(value, step));
         },
         { label: path, coalesce },
       );
+  /** whole units, or tenths with Shift */
+  const stepFor = (fine?: boolean): number => (fine ? 0.1 : 1);
 
   if (item instanceof Anchor && o.kind === 'anchor') {
     // A fixed anchor is the one thing in a figure that is purely a place, so
@@ -113,7 +118,8 @@ export function handlesFor(o: ObjectDoc, fig: CompiledFigure, f: Frame): Handle[
         at,
         label: `radius ${radius.toFixed(0)} — drag the rim`,
         shape: 'square',
-        drag: (world, state) => editNumber('radius', Math.hypot(world.x - center.x, world.y - center.y), `${o.id}:radius`)(state),
+        drag: (world, state, fine) =>
+          editNumber('radius', Math.hypot(world.x - center.x, world.y - center.y), `${o.id}:radius`, stepFor(fine))(state),
       });
     }
 
@@ -127,15 +133,15 @@ export function handlesFor(o: ObjectDoc, fig: CompiledFigure, f: Frame): Handle[
         at: center,
         label: `off-centre by ${(o.eccentric.ratio * 100).toFixed(0)}% of its radius — drag it`,
         shape: 'round',
-        drag: (world, state) => {
+        drag: (world, state, fine) => {
           const offset = sub(world, parent);
           const ratio = radius > 0 ? Math.hypot(offset.x, offset.y) / radius : 0;
           state.edit(
             (doc) => {
               const target = doc.objects.find((x) => x.id === o.id) as SphereDoc | undefined;
               if (!target?.eccentric) return false;
-              target.eccentric.ratio = round(Math.min(ratio, 1));
-              target.eccentric.direction = round(norm360(lonOf(offset)));
+              target.eccentric.ratio = snapTo(Math.min(ratio, 1), fine ? 0.001 : 0.01);
+              target.eccentric.direction = snapTo(norm360(lonOf(offset)), stepFor(fine));
             },
             { label: 'off-centre', coalesce: `${o.id}:ecc` },
           );
@@ -175,15 +181,21 @@ export function handlesFor(o: ObjectDoc, fig: CompiledFigure, f: Frame): Handle[
               ? `at ${bearing.toFixed(1)}° — drag to set its angle`
               : `drag to set where it stands when the clock reads zero`,
           shape: 'diamond',
-          drag: (world, state) => {
+          drag: (world, state, fine) => {
             // Measured from wherever the angle is actually counted from, so a
             // sphere with `measureFrom` set (the Rambam's moon, counted from
             // the earth) drags to the bearing the figure means, not to one
             // taken from a centre the construction never uses.
             const from = item.cfg.measureFrom !== undefined ? resolvePoint(item.cfg.measureFrom, f) : center;
-            const want = norm360(lonOf(sub(world, from)));
-            if (o.angle !== undefined) editNumber('angle', want, `${o.id}:angle`)(state);
-            else editNumber('phase', norm360(want - (o.speed ?? 0) * f.t), `${o.id}:phase`)(state);
+            // and less whatever it is counted from, when that is its carrier
+            // rather than east: the bearing on screen is the carrier's plus its own
+            // — and in its own sense, when it turns clockwise
+            const sense = o.clockwise ? -1 : 1;
+            const own = sense * (typeof o.angle === 'number' ? o.angle : (o.phase ?? 0) + (o.speed ?? 0) * f.t);
+            const carrier = norm360(bearing - own);
+            const want = norm360(sense * (lonOf(sub(world, from)) - carrier));
+            if (o.angle !== undefined) editNumber('angle', want, `${o.id}:angle`, stepFor(fine))(state);
+            else editNumber('phase', norm360(want - (o.speed ?? 0) * f.t), `${o.id}:phase`, stepFor(fine))(state);
           },
         });
       }
@@ -216,7 +228,8 @@ export function handlesFor(o: ObjectDoc, fig: CompiledFigure, f: Frame): Handle[
         at: mid,
         label: `arc radius ${item.radiusAt(f).toFixed(0)} — drag it out`,
         shape: 'square',
-        drag: (world, state) => editNumber('radius', Math.hypot(world.x - vertex.x, world.y - vertex.y), `${o.id}:radius`)(state),
+        drag: (world, state, fine) =>
+          editNumber('radius', Math.hypot(world.x - vertex.x, world.y - vertex.y), `${o.id}:radius`, stepFor(fine))(state),
       });
     }
     // The two arms, when either is a plain bearing rather than an object it
@@ -232,7 +245,7 @@ export function handlesFor(o: ObjectDoc, fig: CompiledFigure, f: Frame): Handle[
         at: { x: vertex.x + d.x, y: vertex.y + d.y },
         label: `${arm} ${value.toFixed(1)}° — drag the arm`,
         shape: 'diamond',
-        drag: (world, state) => editNumber(arm, norm360(lonOf(sub(world, vertex))), `${o.id}:${arm}`)(state),
+        drag: (world, state, fine) => editNumber(arm, norm360(lonOf(sub(world, vertex))), `${o.id}:${arm}`, stepFor(fine))(state),
       });
     }
   }
@@ -264,14 +277,14 @@ export function handlesFor(o: ObjectDoc, fig: CompiledFigure, f: Frame): Handle[
         at: item.toAt(f),
         label: 'drag to aim this sightline and set how far it reaches',
         shape: 'diamond',
-        drag: (world, state) => {
+        drag: (world, state, fine) => {
           const offset = sub(world, start);
           state.edit(
             (doc) => {
               const target = doc.objects.find((x) => x.id === o.id);
               if (!target || target.kind !== 'connector') return false;
-              target.toward = round(norm360(lonOf(offset)));
-              target.length = round(Math.hypot(offset.x, offset.y));
+              target.toward = snapTo(norm360(lonOf(offset)), stepFor(fine));
+              target.length = snapTo(Math.hypot(offset.x, offset.y), stepFor(fine));
             },
             { label: 'aim', coalesce: `${o.id}:tip` },
           );
@@ -304,7 +317,7 @@ export function handlesFor(o: ObjectDoc, fig: CompiledFigure, f: Frame): Handle[
         at: item.position(f),
         label: `reading ${o.toward.toFixed(1)}° — drag it round the ring`,
         shape: 'diamond',
-        drag: (world, state) => editNumber('toward', norm360(lonOf(sub(world, center))), `${o.id}:toward`)(state),
+        drag: (world, state, fine) => editNumber('toward', norm360(lonOf(sub(world, center))), `${o.id}:toward`, stepFor(fine))(state),
       });
     }
     if (typeof o.radius === 'number') {
@@ -314,12 +327,20 @@ export function handlesFor(o: ObjectDoc, fig: CompiledFigure, f: Frame): Handle[
         at: { x: center.x + d.x, y: center.y + d.y },
         label: 'drag to set which circle it reads against',
         shape: 'square',
-        drag: (world, state) => editNumber('radius', Math.hypot(world.x - center.x, world.y - center.y), `${o.id}:radius`)(state),
+        drag: (world, state, fine) =>
+          editNumber('radius', Math.hypot(world.x - center.x, world.y - center.y), `${o.id}:radius`, stepFor(fine))(state),
       });
     }
   }
 
   return out;
+}
+
+/** To the nearest `step`, without the float dust (`33.99999999999999`) a
+ * multiplication leaves behind. */
+function snapTo(n: number, step: number): number {
+  const places = Math.max(0, -Math.floor(Math.log10(step)));
+  return Number((Math.round(n / step) * step).toFixed(places));
 }
 
 /** World px to a tenth. A drag produces a float per pixel of pointer travel,

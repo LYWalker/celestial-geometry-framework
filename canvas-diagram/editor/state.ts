@@ -62,7 +62,15 @@ export class EditorState {
   params: Record<string, number> = {};
   /** The figure's clock. */
   t: number;
-  playing: boolean;
+  /** Whether the clock is running in the editor. Always starts paused,
+   * whatever the document says: `clock.running` is how the *emitted* figure
+   * behaves, and a body that moves while you are trying to click it, or
+   * attach something to it, is the first thing that makes an editor feel
+   * broken. Press play to watch it go. */
+  playing = false;
+  /** Bumped whenever a whole document is loaded — how the editor knows to
+   * re-fit the camera to a new figure, and not to an edit of this one. */
+  loads = 0;
   /** The compiled figure — replaced wholesale on every edit. */
   fig: CompiledFigure;
 
@@ -78,7 +86,6 @@ export class EditorState {
   constructor(doc: DiagramDoc) {
     this.doc = doc;
     this.t = doc.clock.start ?? 0;
-    this.playing = doc.clock.running;
     this.resetParams();
     this.fig = compileDoc(this.doc, { env: this.env });
   }
@@ -128,7 +135,8 @@ export class EditorState {
     this.lastCoalesce = undefined;
     this.doc = doc;
     this.t = doc.clock.start ?? 0;
-    this.playing = doc.clock.running;
+    this.playing = false;
+    this.loads++;
     this.selectedId = null;
     this.resetParams();
     this.recompile();

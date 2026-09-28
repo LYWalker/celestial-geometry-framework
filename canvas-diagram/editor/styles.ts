@@ -44,6 +44,10 @@ export const EDITOR_CSS = `
   padding: 0.22rem 0.4rem;
 }
 .cdx button { cursor: pointer; }
+/* A native menu draws its options on the platform's own light surface; left
+   to inherit this panel's pale ink they are close to invisible. */
+.cdx select option { background: var(--cdx-panel); color: var(--cdx-ink); }
+.cdx select option:disabled { color: var(--cdx-dim); }
 .cdx button:hover:not(:disabled) { border-color: var(--cdx-accent); }
 .cdx button:disabled { opacity: 0.35; cursor: default; }
 .cdx input:focus,
@@ -58,7 +62,25 @@ export const EDITOR_CSS = `
   border-bottom: 1px solid var(--cdx-line);
   flex-wrap: wrap;
 }
-.cdx-title { min-width: 14rem; font-weight: 600; }
+.cdx-title { min-width: 10rem; width: 14rem; font-weight: 600; }
+.cdx-tools { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--cdx-line); border-radius: 7px; margin-left: 0.4rem; }
+.cdx .cdx-tool { display: flex; align-items: center; gap: 0.3rem; border: none; background: none; padding: 0.22rem 0.5rem; color: var(--cdx-dim); }
+.cdx .cdx-tool:hover { color: var(--cdx-ink); background: rgba(150, 168, 214, 0.1); }
+.cdx .cdx-tool.is-on { color: var(--cdx-bg); background: var(--cdx-accent); }
+.cdx-tool-icon { display: inline-block; width: 1.1em; text-align: center; font-size: 0.95em; }
+.cdx-icons { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; }
+.cdx .cdx-icon { padding: 0.15rem; line-height: 0; background: rgba(7, 11, 22, 0.6); }
+.cdx .cdx-icon canvas { width: 28px; height: 28px; }
+.cdx .cdx-icon.is-on { border-color: var(--cdx-accent); box-shadow: 0 0 0 1px var(--cdx-accent); }
+.cdx .cdx-icon-color { width: 2rem; height: 2rem; padding: 1px; }
+.cdx-note { margin: 0.25rem 0 0; font-size: 0.72rem; color: var(--cdx-accent); }
+.cdx .cdx-toggle { color: var(--cdx-dim); }
+.cdx .cdx-toggle.is-on { color: var(--cdx-accent); border-color: var(--cdx-accent); background: rgba(143, 214, 201, 0.1); }
+.cdx .cdx-sense { flex: none; padding: 0.22rem 0.5rem; }
+.cdx-precise { font-variant-numeric: tabular-nums; }
+.cdx-readout { font-size: 0.72rem; color: var(--cdx-accent); opacity: 0.85; line-height: 1.35; }
+.cdx-readout.is-bad { color: var(--cdx-warn); opacity: 1; }
+.cdx .cdx-primary { border-color: var(--cdx-accent); color: var(--cdx-accent); }
 .cdx-spacer { flex: 0 0 0.6rem; }
 .cdx-toolbar .cdx-spacer + * { margin-left: auto; }
 
@@ -169,11 +191,30 @@ export const EDITOR_CSS = `
 .cdx-fcontrol select,
 .cdx-fcontrol textarea { width: 100%; max-width: 100%; box-sizing: border-box; }
 .cdx-help {
+  display: none;
   margin: 0.2rem 0 0;
   font-size: 0.71rem;
   line-height: 1.4;
   color: rgba(150, 160, 189, 0.72);
 }
+/* Help under a field only while that field is being used — a paragraph under
+   every row turns a panel into a page. The field's name carries the same line
+   as a tooltip for anyone reading before touching. */
+.cdx-field:focus-within > .cdx-help,
+.cdx-stack > .cdx-help { display: block; }
+.cdx-fname { cursor: help; }
+.cdx-actions { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.3rem; }
+.cdx-actions button { font-size: 0.78rem; }
+.cdx-more { margin-top: 0.8rem; border-top: 1px solid var(--cdx-line); padding-top: 0.4rem; }
+.cdx-more > summary { cursor: pointer; color: var(--cdx-dim); font-size: 0.78rem; padding: 0.2rem 0; }
+.cdx-more > summary:hover { color: var(--cdx-ink); }
+.cdx .cdx-pick { flex: none; padding: 0.22rem 0.45rem; color: var(--cdx-accent); }
+.cdx-start { color: var(--cdx-dim); font-size: 0.82rem; line-height: 1.5; }
+.cdx-start p { margin: 0.4rem 0 0.6rem; }
+.cdx-start ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.cdx-start li { display: flex; gap: 0.45rem; }
+.cdx-start .cdx-tool-icon { color: var(--cdx-accent); flex: none; }
+.cdx-start strong { color: var(--cdx-ink); font-weight: 600; }
 .cdx-clear { padding: 0 0.3rem; background: none; border: none; color: var(--cdx-dim); line-height: 1; }
 .cdx-clear:hover { color: var(--cdx-warn); }
 

@@ -35,6 +35,11 @@
  */
 
 import type { Face } from '../labels.js';
+import {
+  DEFAULT_BACKGROUND as SCENE_BACKGROUND,
+  DEFAULT_THEME as SCENE_THEME,
+  MAZALOT as SCENE_MAZALOT,
+} from '../scene/defaults.js';
 
 /** The document format's own version, bumped when a migration is needed. */
 export const DOC_VERSION = 1;
@@ -142,6 +147,10 @@ export interface AnchorDoc extends MetaDoc {
   at?: PointValue;
   marker?: 'cross' | 'crosshair' | 'dot' | 'none';
   dotSize?: number;
+  /** a body drawn here instead of the marker — see `SphereDoc.render` */
+  render?: Ref | Expr;
+  /** which known body it is, for the editor's menu — see `SphereDoc.body` */
+  body?: string;
 }
 
 export interface EccentricDoc {
@@ -163,6 +172,15 @@ export interface SphereDoc extends MetaDoc {
   speed?: number;
   phase?: number;
   angle?: NumValue;
+  countFrom?: 'east' | 'carrier';
+  clockwise?: boolean;
+  /**
+   * Which of the known bodies (`bodies.ts`) rides it — `'sun'`, `'moon'` — or
+   * `'custom'` for one named and drawn by hand. The editor's own note, so its
+   * menu can say what was chosen: the name, colour and icon it brought are
+   * ordinary fields, and this one is neither compiled nor emitted.
+   */
+  body?: string;
   plane?: PlaneDoc;
   measureFrom?: PointValue;
   showRing?: boolean;
@@ -376,55 +394,13 @@ export interface DiagramDoc {
  * way, so the editor may as well.
  * ---------------------------------------------------------------------- */
 
-const SANS = (weight: number, px: number): FaceDoc => ({
-  css: `${weight} ${px}px "Inter Variable", Inter, system-ui, sans-serif`,
-  px,
-});
-const HEBREW = (weight: number, px: number): FaceDoc => ({
-  css: `${weight} ${px}px "Frank Ruhl Libre", "SBL Hebrew", David, serif`,
-  px,
-});
-
-export const DEFAULT_THEME: ThemeDoc = {
-  font: SANS(500, 11),
-  activeFont: SANS(600, 11),
-  subFont: HEBREW(400, 11.5),
-  noteFont: SANS(500, 9.5),
-  ink: '#e9e6df',
-  dim: '#96a0bd',
-  halo: 'rgba(7,11,22,0.92)',
-  ring: 'rgba(150,168,214,0.35)',
-  body: '#e9e6df',
-  centerMark: 'rgba(224,180,92,0.85)',
-  angle: '#8fd6c9',
-  connector: 'rgba(224,180,92,0.6)',
-  trail: 'rgba(216,212,200,0.5)',
-};
-
-export const DEFAULT_BACKGROUND: BackgroundDoc = {
-  mid: '#0d1526',
-  deep: '#070b16',
-  star: 'rgba(216,212,200,0.75)',
-  vignette: 'rgba(3,5,12,0.55)',
-};
-
-/** The twelve, English and Hebrew — what a ring is nearly always segmented
- * into in these figures, so the editor offers it rather than making an author
- * type twelve names before a ring appears at all. */
-export const MAZALOT: readonly ZodiacSegmentDoc[] = [
-  { name: 'Aries', nameHe: 'טלה' },
-  { name: 'Taurus', nameHe: 'שור' },
-  { name: 'Gemini', nameHe: 'תאומים' },
-  { name: 'Cancer', nameHe: 'סרטן' },
-  { name: 'Leo', nameHe: 'אריה' },
-  { name: 'Virgo', nameHe: 'בתולה' },
-  { name: 'Libra', nameHe: 'מאזנים' },
-  { name: 'Scorpio', nameHe: 'עקרב' },
-  { name: 'Sagittarius', nameHe: 'קשת' },
-  { name: 'Capricorn', nameHe: 'גדי' },
-  { name: 'Aquarius', nameHe: 'דלי' },
-  { name: 'Pisces', nameHe: 'דגים' },
-];
+// The house style lives in the scene layer, where hand-written figures use it
+// too; the document's types are the same shapes, so these are the same values.
+export const DEFAULT_THEME: ThemeDoc = SCENE_THEME;
+export const DEFAULT_BACKGROUND: BackgroundDoc = SCENE_BACKGROUND;
+/** The twelve, English and Hebrew — offered by the editor so a ring appears
+ * without an author typing twelve names first. */
+export const MAZALOT: readonly ZodiacSegmentDoc[] = SCENE_MAZALOT;
 
 export function emptyDoc(): DiagramDoc {
   return {
@@ -634,6 +610,25 @@ function findCycles(doc: DiagramDoc): string[][] {
 
   for (const o of doc.objects) walk(o.id);
   return cycles;
+}
+
+/**
+ * An id made from a name — `the moon's epicycle` → `moons-epicycle` — unique
+ * among `taken`, or null for a name that makes none. A leading "the" is
+ * dropped: every name in these figures has one, and `const theMoon` says
+ * nothing `const moon` does not.
+ */
+export function idFromName(name: string, taken: ReadonlySet<string>): string | null {
+  const base = name
+    .toLowerCase()
+    .replace(/['’]s\b/g, 's')
+    .replace(/^the\s+/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  if (base === '' || /^\d/.test(base)) return null;
+  let id = base;
+  for (let i = 2; taken.has(id); i++) id = `${base}-${i}`;
+  return id;
 }
 
 /** Read a document from JSON text, failing with a readable message rather

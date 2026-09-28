@@ -18,7 +18,8 @@
  * bar these lines are written to.
  */
 
-import type { ObjectDoc, ObjectKind } from './doc.js';
+import type { DiagramDoc, ObjectDoc, ObjectKind } from './doc.js';
+import type { Unit } from './units.js';
 
 export type FieldType =
   /** a line of text */
@@ -70,23 +71,23 @@ export interface FieldSpec {
   /** what the scene layer does when this is left empty — shown as the
    * placeholder, so an omitted field reads as a default rather than a blank */
   fallback?: string;
+  /** what kind of quantity a number is, so it can be typed the way the
+   * sources state it (`13°10′35″`, `26°45′ Gemini`, `2;30/60`) and read back
+   * in every form — see `units.ts` */
+  unit?: Unit | ((o: ObjectDoc) => Unit);
+  /** tucked under "More options" rather than shown with the essentials.
+   * Defaults to whether the path is in `ADVANCED`. */
+  advanced?: boolean;
   /** show this field only when the object is in a state where it means
    * something: `phase` is meaningless once `angle` is set, and saying so by
    * hiding it is clearer than a note under a control that does nothing */
-  when?: (o: ObjectDoc) => boolean;
+  when?: (o: ObjectDoc, doc: DiagramDoc) => boolean;
 }
 
 /** The order the panel's sections appear in. */
 export const GROUPS = ['What it is', 'Where it is', 'How it moves', 'Its name', 'How it draws'] as const;
 
 const ID: FieldSpec[] = [
-  {
-    path: 'id',
-    label: 'id',
-    type: 'text',
-    group: 'What it is',
-    help: 'How everything else refers to this object, and the name it becomes in the emitted code. Renaming it updates every reference.',
-  },
   {
     path: 'name',
     label: 'Name',
@@ -107,6 +108,13 @@ const ID: FieldSpec[] = [
     type: 'prose',
     group: 'What it is',
     help: 'A sentence or two: the hover tooltip’s second line, and the figure’s screen-reader text.',
+  },
+  {
+    path: 'id',
+    label: 'id',
+    type: 'text',
+    group: 'What it is',
+    help: 'How everything else refers to this object, and the name it becomes in the emitted code. Renaming it updates every reference.',
   },
 ];
 
@@ -207,16 +215,19 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
       type: 'enum',
       group: 'How it draws',
       options: ['cross', 'crosshair', 'dot', 'none'],
+      // a point drawn as a body has no marker to choose
+      when: (o) => o.kind === 'anchor' && o.render === undefined,
       help: 'A crosshair for a centre the construction keeps referring back to; “none” for a point that exists only for others to reference.',
       fallback: 'cross',
     },
-    { path: 'dotSize', label: 'Marker size', type: 'number', group: 'How it draws', step: 0.5, min: 0 },
+    { path: 'dotSize', label: 'Size', type: 'number', group: 'How it draws', step: 0.5, min: 0 },
   ],
 
   sphere: [
     {
       path: 'radius',
       label: 'Radius',
+      unit: 'length',
       type: 'scalar',
       group: 'Where it is',
       help: 'This circle’s own radius, world px. Drag its rim on the canvas to set it.',
@@ -234,6 +245,7 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     {
       path: 'eccentric.ratio',
       label: 'Off-centre by',
+      unit: 'ratio',
       type: 'scalar',
       group: 'Where it is',
       help: 'How far this circle’s own centre sits from what it is centred on, as a fraction of its radius. That offset alone is why the sun runs fast in one season and slow in another.',
@@ -245,6 +257,7 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     {
       path: 'eccentric.direction',
       label: 'Off-centre toward',
+      unit: 'bearing',
       type: 'dir',
       group: 'Where it is',
       help: 'Which way the offset points — a fixed bearing for an apogee, or something that moves.',
@@ -252,7 +265,7 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     },
     {
       path: 'measureFrom',
-      label: 'Measure the angle from',
+      label: 'Its angle is seen from',
       type: 'point',
       group: 'Where it is',
       help: 'Count this sphere’s angle from here instead of from its own centre, and put the body where that ray meets the rim — the construction the Rambam’s moon needs, whose course is counted from the earth.',
@@ -262,6 +275,7 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     {
       path: 'plane.tilt',
       label: 'Tilt out of the page',
+      unit: 'angle',
       type: 'scalar',
       group: 'Where it is',
       help: 'Degrees. The rim then draws as an ellipse and the body gains a real depth — an exact projection, not an impression.',
@@ -271,6 +285,7 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     {
       path: 'plane.nodes',
       label: 'Line of nodes',
+      unit: 'bearing',
       type: 'dir',
       group: 'Where it is',
       help: 'The bearing it is tipped about. Real nodes move — the moon’s regress once round in 18.6 years.',
@@ -290,25 +305,51 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     },
     {
       path: 'speed',
-      label: 'Speed',
+      label: 'Motion',
+      unit: 'rate',
       type: 'number',
       group: 'How it moves',
-      help: 'Degrees per unit of the clock. Leave at zero for a bare shell nothing rides.',
+      help: 'How fast it turns, per unit of the clock. Type it as the source gives it: 13°10′35″ (a day), 136°28′20″ per 10000 days, 27.32 days (once round), 0.9856. ↺/↻ sets which way. For a motion that is not even — a true place from a table — give its angle outright, under More options.',
       step: 0.1,
       when: (o) => o.kind === 'sphere' && o.angle === undefined,
     },
     {
       path: 'phase',
-      label: 'Phase',
+      label: 'Where it starts',
+      unit: (o) => (o.kind === 'sphere' && o.countFrom === 'carrier' ? 'angle' : 'bearing'),
       type: 'number',
       group: 'How it moves',
-      help: 'Where the body stands when the clock reads zero. Drag the body on the canvas to set it.',
+      help: 'Where the body stands when the clock reads zero — at the epoch. A longitude, like 1°14′43″ Taurus; or, counted from its carrier, the angle along it, like the moon’s course of 84°28′42″ (14:4).',
       step: 1,
       when: (o) => o.kind === 'sphere' && o.angle === undefined,
     },
     {
+      path: 'clockwise',
+      label: 'Turns clockwise',
+      type: 'bool',
+      group: 'How it moves',
+      help: 'Its motion and starting point are counted clockwise — how the Rambam gives the small sphere, which turns against the large one (14:3), so his numbers go in as he states them. The ↻ beside Motion does the same.',
+      when: (o) => o.kind === 'sphere' && (o.speed !== undefined || o.angle !== undefined),
+    },
+    {
+      path: 'countFrom',
+      label: 'Its motion is counted from',
+      type: 'enum',
+      group: 'How it moves',
+      options: ['east', 'carrier'],
+      help: '“carrier”: from the line the sphere it rides carries it along — how the Rambam gives an epicycle’s motion (the moon’s course, 14:3, counted from the small sphere’s far point). Choose it, and his numbers go in as he states them.',
+      fallback: 'east',
+      // only for a sphere riding another sphere — anything else has no line to count from
+      when: (o, doc) =>
+        o.kind === 'sphere' &&
+        o.center !== undefined &&
+        'ref' in o.center &&
+        doc.objects.some((x) => x.kind === 'sphere' && 'ref' in o.center! && x.id === (o.center as { ref: string }).ref),
+    },
+    {
       path: 'angle',
       label: 'Angle outright',
+      unit: (o) => (o.kind === 'sphere' && o.countFrom === 'carrier' ? 'angle' : 'bearing'),
       type: 'scalar',
       group: 'How it moves',
       help: 'The bearing itself, for a body whose motion is not a constant rate — where a real ephemeris plugs in. Takes precedence over speed and phase.',
@@ -368,14 +409,17 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     {
       path: 'from',
       label: 'From',
+      unit: 'bearing',
       type: 'dir',
       group: 'Where it is',
       help: 'One arm — a bearing, or an object to sight at, in which case the arm follows wherever it goes.',
     },
-    { path: 'to', label: 'To', type: 'dir', group: 'Where it is', help: 'The other arm.' },
+    { path: 'to', label: 'To', unit: 'bearing',
+      type: 'dir', group: 'Where it is', help: 'The other arm.' },
     {
       path: 'radius',
       label: 'Arc radius',
+      unit: 'length',
       type: 'scalar',
       group: 'Where it is',
       help: 'How far out the arc is drawn, world px. As an expression it can stay a constant fraction of the way out to whatever it sights at.',
@@ -429,6 +473,7 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     {
       path: 'toward',
       label: 'Toward',
+      unit: 'bearing',
       type: 'dir',
       group: 'Where it is',
       help: 'A bearing from the start, used with a length instead of an end point.',
@@ -437,6 +482,7 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     {
       path: 'length',
       label: 'Length',
+      unit: 'length',
       type: 'scalar',
       group: 'Where it is',
       step: 1,
@@ -533,6 +579,7 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     {
       path: 'radius',
       label: 'Ring radius',
+      unit: 'length',
       type: 'scalar',
       group: 'Where it is',
       help: 'Point this at the ring’s own inner edge, so the tick can never sit on a different circle than the one drawn.',
@@ -549,6 +596,7 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
     {
       path: 'toward',
       label: 'Reading',
+      unit: 'bearing',
       type: 'dir',
       group: 'Where it is',
       help: 'The longitude being read — a bearing, or an object to sight at.',
@@ -585,6 +633,52 @@ const BY_KIND: Record<ObjectKind, FieldSpec[]> = {
   ],
 };
 
+/**
+ * Fields most figures never touch. They stay one click away under "More
+ * options" instead of in the way: a sphere is a centre, a radius and how it
+ * turns, and a panel that leads with label rank and line width buries that.
+ */
+const ADVANCED = new Set([
+  'id',
+  'hebrewFirst',
+  'showLabel',
+  'labelDir',
+  'labelRank',
+  'labelGap',
+  'labelFont',
+  'labelSubFont',
+  'excludeFromExtent',
+  'layer',
+  'dotSize',
+  'lineWidth',
+  'plane.behindFade',
+  'parallax',
+  'format',
+  'render',
+  'labelAt',
+  'shorten',
+  'dependsOn',
+  'reach',
+  'step',
+  'bands',
+  'relativeTo',
+  'showBody',
+  'plane.tilt',
+  'plane.nodes',
+  'angle',
+  'clockwise',
+]);
+
+/** The unit a field is in, for this object — some depend on it: a sphere's
+ * starting point is a longitude, unless it is counted from its carrier. */
+export function unitOf(spec: FieldSpec, o: ObjectDoc): Unit | undefined {
+  return typeof spec.unit === 'function' ? spec.unit(o) : spec.unit;
+}
+
+export function isAdvanced(spec: FieldSpec): boolean {
+  return spec.advanced ?? ADVANCED.has(spec.path);
+}
+
 /** Every field the inspector shows for one kind, in panel order. */
 export function fieldsFor(kind: ObjectKind): FieldSpec[] {
   const all = [...ID, ...(BY_KIND[kind] ?? []), ...LABEL, ...DRAW];
@@ -606,9 +700,9 @@ export const KIND_NOTES: Record<ObjectKind, string> = {
 
 /** The label for each kind in the object list and the add menu. */
 export const KIND_LABELS: Record<ObjectKind, string> = {
-  anchor: 'Anchor',
+  anchor: 'Point',
   sphere: 'Sphere',
-  connector: 'Connector',
+  connector: 'Line',
   angle: 'Angle',
   trail: 'Trail',
   ringmarker: 'Ring reading',

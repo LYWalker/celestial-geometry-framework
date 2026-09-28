@@ -271,6 +271,12 @@ function buildItem(o: ObjectDoc, env: Env, items: Map<string, SceneItem>): Scene
       put(cfg, 'at', o.at === undefined ? undefined : pointOf(o.at, env, at('at'), items));
       put(cfg, 'marker', o.marker);
       put(cfg, 'dotSize', o.dotSize);
+      if (o.render !== undefined) {
+        const renderer = isRef(o.render)
+          ? getRenderer(o.render.ref)
+          : env.compileValue<BodyRenderer | undefined>(o.render.expr, at('render'), undefined);
+        put(cfg, 'render', renderer);
+      }
       return new Anchor(cfg as unknown as AnchorConfig);
     }
 
@@ -289,6 +295,8 @@ function buildItem(o: ObjectDoc, env: Env, items: Map<string, SceneItem>): Scene
       put(cfg, 'speed', o.speed);
       put(cfg, 'phase', o.phase);
       put(cfg, 'angle', o.angle === undefined ? undefined : numOf(o.angle, env, at('angle')));
+      put(cfg, 'countFrom', o.countFrom);
+      put(cfg, 'clockwise', o.clockwise);
       if (o.plane) {
         const plane: Record<string, unknown> = {
           tilt: numOf(o.plane.tilt ?? 0, env, at('plane.tilt')),

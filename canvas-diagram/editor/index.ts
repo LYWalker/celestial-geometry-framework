@@ -26,3 +26,4 @@ export * from './renderers.js';
 export * from './state.js';
 export * from './editor.js';
 export * from './examples/index.js';
+export * from './bodies.js';

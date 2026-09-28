@@ -26,8 +26,10 @@
  * in the emitted file, and there can only be one rule for what an id is called.
  */
 
-import { isExpr, isRef, isXY, refFields, type DiagramDoc, type ObjectDoc, type ParamDoc } from './doc.js';
+import { isExpr, isRef, isXY, refFields, type DiagramDoc, type ObjectDoc } from './doc.js';
 import { varName } from './compile.js';
+import { formatLongitude } from './units.js';
+import { DEFAULT_BACKGROUND, DEFAULT_THEME } from '../scene/defaults.js';
 
 export interface EmitOptions {
   /**
@@ -88,14 +90,19 @@ const FRAME_WRAPPER = 'on';
  * the wrapper and it restores in a `finally`.
  */
 let wrapFrameExprs = false;
+/** What one unit of the clock is, for the notes beside a rate — set with it. */
+let clockUnit = 'day';
 
 function withFrameWrapper<T>(doc: DiagramDoc, emit: () => T): T {
   const was = wrapFrameExprs;
+  const wasUnit = clockUnit;
   wrapFrameExprs = doc.params.length > 0;
+  clockUnit = (doc.clock.unit ?? 'day').replace(/s$/, '') || 'day';
   try {
     return emit();
   } finally {
     wrapFrameExprs = was;
+    clockUnit = wasUnit;
   }
 }
 
@@ -189,11 +196,46 @@ function str(s: string): string {
 }
 
 /** Numbers as an author would have typed them: no exponent for ordinary
- * magnitudes, and no `0.30000000000000004` from an editor's arithmetic. */
+ * magnitudes, and no `0.30000000000000004` from an editor's arithmetic — but
+ * no rounding that loses anything either: a daily motion cut to six places
+ * drifts visibly over the thousands of days these figures run. */
 function fmtNumber(n: number): string {
   if (!Number.isFinite(n)) return '0';
   if (Number.isInteger(n)) return String(n);
-  return String(Math.round(n * 1e6) / 1e6);
+  return String(Number(n.toPrecision(12)));
+}
+
+/** Separates a printed value from the note that follows its comma. */
+const NOTE = '\u0001';
+
+/**
+ * An angle or a rate that was given in degrees, minutes and seconds, written
+ * back that way — `13 + 10 / 60 + 35 / 3600` rather than `13.1763888889` —
+ * so the source reads as the text it came from, and is exact. Anything that
+ * is not a whole number of seconds (or tenths of one) is left as a decimal.
+ */
+function sexagesimal(kind: 'rate' | 'bearing' | 'angle'): (v: unknown) => string {
+  return (v) => {
+    if (typeof v !== 'number') return kind === 'rate' ? num(v) : dir(v);
+    const a = Math.abs(v);
+    const tenths = Math.round(a * 36000);
+    if (Number.isInteger(v) || Math.abs(a * 36000 - tenths) > 1e-6) return fmtNumber(v);
+    const d = Math.floor(tenths / 36000);
+    const m = Math.floor((tenths - d * 36000) / 600);
+    const sec = (tenths - d * 36000 - m * 600) / 10;
+    const parts = [String(d)];
+    if (m) parts.push(`${m} / 60`);
+    if (sec) parts.push(`${sec} / 3600`);
+    const expr = `${v < 0 ? '-(' : ''}${parts.join(' + ')}${v < 0 ? ')' : ''}`;
+    const said = `${d}°${m ? `${m}′` : ''}${sec ? `${sec}″` : ''}`;
+    const note =
+      kind === 'rate'
+        ? `${said} a ${clockUnit}`
+        : kind === 'bearing'
+          ? formatLongitude(v)
+          : said;
+    return `${expr}${NOTE}${note}`;
+  };
 }
 
 function pascal(s: string): string {
@@ -210,7 +252,14 @@ type Entry = [string, string];
  * and laying it out as this codebase lays out its own: one field per line, the
  * description on its own, trailing commas throughout. */
 function literal(entries: Entry[], indent = '    '): string {
-  const inner = entries.map(([k, v]) => `${indent}  ${k}: ${v},`).join('\n');
+  const inner = entries
+    .map(([k, v]) => {
+      // a value may carry a trailing note (see `sexagesimal`), which belongs
+      // after the comma, not inside the expression
+      const [value, note] = v.split(NOTE);
+      return `${indent}  ${k}: ${value},${note !== undefined ? ` // ${note}` : ''}`;
+    })
+    .join('\n');
   return `{\n${inner}\n${indent}}`;
 }
 
@@ -255,17 +304,20 @@ function emitObject(o: ObjectDoc): string {
       take(e, 'at', o.at, point);
       take(e, 'marker', o.marker, (v) => str(v as string));
       take(e, 'dotSize', o.dotSize, num);
+      take(e, 'render', o.render, (v) => (isRef(v) ? `renderers.${v.ref}` : (v as { expr: string }).expr));
       break;
 
     case 'sphere':
       e.push(['radius', num(o.radius)]);
       take(e, 'center', o.center, point);
       if (o.eccentric) {
-        e.push(['eccentric', `{ ratio: ${num(o.eccentric.ratio)}, direction: ${dir(o.eccentric.direction)} }`]);
+        e.push(['eccentric', `{ ratio: ${num(o.eccentric.ratio)}, direction: ${sexagesimal('bearing')(o.eccentric.direction).split(NOTE)[0]} }`]);
       }
-      take(e, 'speed', o.speed, num);
-      take(e, 'phase', o.phase, num);
-      take(e, 'angle', o.angle, num);
+      take(e, 'speed', o.speed, sexagesimal('rate'));
+      take(e, 'phase', o.phase, sexagesimal(o.countFrom === 'carrier' ? 'angle' : 'bearing'));
+      take(e, 'angle', o.angle, typeof o.angle === 'number' ? sexagesimal(o.countFrom === 'carrier' ? 'angle' : 'bearing') : num);
+      take(e, 'countFrom', o.countFrom, (v) => str(v as string));
+      take(e, 'clockwise', o.clockwise, String);
       if (o.plane) {
         const p: Entry[] = [['tilt', num(o.plane.tilt)], ['nodes', dir(o.plane.nodes)]];
         take(p, 'behindFade', o.plane.behindFade, num);
@@ -298,7 +350,7 @@ function emitObject(o: ObjectDoc): string {
     case 'connector':
       e.push(['from', point(o.from)]);
       take(e, 'to', o.to, point);
-      take(e, 'toward', o.toward, dir);
+      take(e, 'toward', o.toward, sexagesimal('bearing'));
       take(e, 'length', o.length, num);
       take(e, 'dashed', o.dashed, String);
       take(e, 'shorten', o.shorten, num);
@@ -320,7 +372,7 @@ function emitObject(o: ObjectDoc): string {
       take(e, 'center', o.center, point);
       e.push(['radius', num(o.radius)]);
       take(e, 'pivot', o.pivot, point);
-      e.push(['toward', dir(o.toward)]);
+      e.push(['toward', sexagesimal('bearing')(o.toward)]);
       take(e, 'parallax', o.parallax, (v) => str(v as string));
       take(e, 'style', o.style, (v) => str(v as string));
       take(e, 'reach', o.reach, json);
@@ -336,14 +388,29 @@ function emitObject(o: ObjectDoc): string {
  * The pieces around the objects
  * ---------------------------------------------------------------------- */
 
-function emitTheme(doc: DiagramDoc): string {
-  const t = doc.theme;
+/** The theme fields that differ from the house style — all a figure has to
+ * state, since the rest is `DEFAULT_THEME`. */
+function themeOverrides(doc: DiagramDoc): Entry[] {
   const e: Entry[] = [];
-  for (const [k, v] of Object.entries(t)) {
+  for (const [k, v] of Object.entries(doc.theme)) {
     if (v === undefined) continue;
+    const house = (DEFAULT_THEME as unknown as Record<string, unknown>)[k];
+    if (JSON.stringify(v) === JSON.stringify(house)) continue;
     e.push([k, typeof v === 'string' ? str(v) : json(v)]);
   }
-  return `const THEME: SceneTheme = ${literal(e, '')};`;
+  return e;
+}
+
+function emitTheme(doc: DiagramDoc): string {
+  const overrides = themeOverrides(doc);
+  if (overrides.length === 0) return 'const THEME: SceneTheme = DEFAULT_THEME;';
+  const inner = overrides.map(([k, v]) => `  ${k}: ${v},`).join('\n');
+  return `const THEME: SceneTheme = {\n  ...DEFAULT_THEME,\n${inner}\n};`;
+}
+
+/** Whether the background is anything but the house sky. */
+function backgroundDiffers(doc: DiagramDoc): boolean {
+  return doc.background === false || JSON.stringify(doc.background) !== JSON.stringify(DEFAULT_BACKGROUND);
 }
 
 function emitZodiac(doc: DiagramDoc, indent = '      '): string {
@@ -385,14 +452,6 @@ function emitZodiac(doc: DiagramDoc, indent = '      '): string {
   return literal(e, indent);
 }
 
-/** The Frame this figure builds each draw call: the clock, plus each declared
- * parameter read off whatever control the host gave it. */
-function emitFrame(params: ParamDoc[]): string {
-  if (params.length === 0) return 'frame(t)';
-  const keys = params.map((p) => p.key).join(', ');
-  return `frame(t, { ${keys} })`;
-}
-
 /**
  * Which of the kit's names this figure actually uses.
  *
@@ -402,7 +461,7 @@ function emitFrame(params: ParamDoc[]): string {
  * `noUnusedLocals` it is an error.
  */
 function importsFor(doc: DiagramDoc, target: 'scene' | 'component'): string[] {
-  const used = new Set<string>(['Scene', 'type SceneTheme']);
+  const used = new Set<string>(['Scene']);
   for (const o of doc.objects) used.add(CLASS_OF[o.kind]);
   if (doc.params.length > 0) used.add('type Frame');
   // whatever the figure's own expressions reach for
@@ -415,18 +474,15 @@ function importsFor(doc: DiagramDoc, target: 'scene' | 'component'): string[] {
     if (doc.zodiac.constellations) used.add('ZODIAC_FIGURES');
   }
 
-  if (target === 'component') {
-    used.add('Stage');
-    used.add('HoverController');
-    used.add('frame');
-    used.add('wireCamera');
-    used.add('wireResize');
-    used.add('wireAnimationLoop');
-    used.add('describeSceneInto');
-    used.add('type Vec');
+  if (target === 'scene') {
+    used.add('DEFAULT_THEME');
+    used.add('type SceneTheme');
+  } else {
+    // the chrome round the figure is one call now, not a dozen imports
+    used.add('mountAll');
+    used.add('mountFigure');
     if (doc.zodiac !== false) {
       used.add('ZodiacRing');
-      if (ringHelpersUsed(doc).length > 0) used.add('type Frame');
       if (doc.zodiac.constellations) used.add('ZODIAC_FIGURES');
     }
   }
@@ -468,7 +524,7 @@ function helpersUsed(doc: DiagramDoc, from: readonly string[]): string[] {
 function renderersUsed(doc: DiagramDoc): string[] {
   const names = new Set<string>();
   for (const o of doc.objects) {
-    if (o.kind === 'sphere' && o.render !== undefined && isRef(o.render)) names.add(o.render.ref);
+    if ((o.kind === 'sphere' || o.kind === 'anchor') && o.render !== undefined && isRef(o.render)) names.add(o.render.ref);
   }
   return [...names].sort();
 }
@@ -573,7 +629,10 @@ function emitFrameType(doc: DiagramDoc, indent: string): string {
     `${indent}/** This figure's own frame: the clock, plus the amounts its controls set. */\n` +
     `${indent}interface ${name} extends Frame {\n${fields}\n${indent}}\n\n` +
     `${indent}/** Every Scalar below reads its frame through this — see ${name}. */\n` +
-    `${indent}const ${FRAME_WRAPPER} = <T>(fn: (f: ${name}) => T) => (f: Frame): T => fn(f as ${name});\n`
+    // `<T,>`, not `<T>`: Astro's compiler reads a bare `<T>(` in a component
+    // script as the start of a tag and refuses the file. The comma is the
+    // usual TSX spelling of the same generic, and means nothing else.
+    `${indent}const ${FRAME_WRAPPER} = <T,>(fn: (f: ${name}) => T) => (f: Frame): T => fn(f as ${name});\n`
   );
 }
 
@@ -651,63 +710,65 @@ export function emitScene(doc: DiagramDoc, opts: EmitOptions = {}): string {
   });
 }
 
-/** A whole component: the declarations, plus the chrome every figure in this
- * kit has round them. */
+/**
+ * A whole component: the declarations, and one `mountFigure` call for
+ * everything around them — the canvas, the camera, the clock, hover, the
+ * controls and the screen-reader text. What comes out is the figure and
+ * nothing else; the plumbing lives in the kit, once.
+ */
 function emitComponent(doc: DiagramDoc, opts: EmitOptions): string {
   const from = opts.from ?? KIT;
   const rendererFrom = opts.rendererImport ?? `${KIT}/editor`;
   const slug = doc.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'figure';
   const refId = doc.view.refId ?? doc.objects.find((o) => o.kind === 'anchor')?.id;
-  const refVar = refId !== undefined ? varName(refId) : '';
+  const refVar = refId !== undefined && doc.objects.some((o) => o.id === refId) ? varName(refId) : '';
   const lightVar = doc.view.lightId ? varName(doc.view.lightId) : '';
 
   return withFrameWrapper(doc, () => {
-    const controls = doc.params
-      .map(
-        (p) =>
-          `      <label class="ctl">\n` +
-          `        <span>${escapeHtml(p.label ?? p.key)}</span>\n` +
-          `        <input type="range" data-param="${p.key}" min="${p.min ?? 0}" max="${p.max ?? 1}" step="${p.step ?? 0.01}" value="${p.value}" />\n` +
-          `      </label>`,
-      )
-      .join('\n');
-
-    const paramReads = doc.params
-      .map(
-        (p) =>
-          `        ${p.key} = Number(root.querySelector<HTMLInputElement>('[data-param="${p.key}"]')?.value ?? ${p.value});`,
-      )
-      .join('\n');
-    const paramDecls = doc.params.map((p) => `    let ${p.key} = ${p.value};`).join('\n');
-    const paramWiring =
-      doc.params.length === 0
-        ? ''
-        : `\n    for (const input of root.querySelectorAll<HTMLInputElement>('[data-param]')) {\n` +
-          `      input.addEventListener('input', () => {\n${paramReads}\n        draw();\n      });\n    }\n`;
-
     const objectLines = declarationOrder(doc).map(emitObject).join('\n\n');
     const adds = doc.objects.map((o) => `      .add(${varName(o.id)})`).join('\n');
 
-    // Only the objects this function actually names. Destructuring all of them
-    // "just in case" is how an emitted file arrives with nine unused locals.
+    // Only the objects the mount names. Destructuring all of them "just in
+    // case" is how an emitted file arrives with nine unused locals.
     const wanted = [...new Set([refVar, lightVar].filter((v) => v !== ''))];
     const destructure = wanted.length > 0 ? `, ${wanted.join(', ')}` : '';
 
-    const clockBody = doc.clock.running
-      ? `${fmtNumber(doc.clock.start ?? 0)} + ((performance.now() - start) / 1000) * ${fmtNumber(doc.clock.speed)}`
-      : fmtNumber(doc.clock.start ?? 0);
-    const startDecl = doc.clock.running ? '    const start = performance.now();\n' : '';
-
-    const fitLine =
-      doc.view.fitRadius === 'auto'
-        ? `      // the ring's own resolved outer radius when there is a ring, the scene's\n` +
-          `      // own reach when there isn't — the same number this frame will draw at,\n` +
-          `      // rather than a second estimate of it\n` +
-          `      const t = clock();\n` +
-          `      const f = ${emitFrame(doc.params)};\n` +
-          `      const outer = stage.zodiacGeometry(f, scene)?.outer ?? scene.extent(f);\n` +
-          `      stage.resize({ fitRadius: outer + 12 });`
-        : `      stage.resize({ fitRadius: ${fmtNumber(doc.view.fitRadius)} });`;
+    // Each option only when it differs from what mountFigure does anyway, so
+    // the call reads as a list of what is particular about this figure.
+    const I = '      ';
+    const mount: Entry[] = [['scene', '']];
+    if (refVar) mount.push(['ref', refVar]);
+    if (lightVar) mount.push(['light', lightVar]);
+    const theme = themeOverrides(doc);
+    if (theme.length > 0) mount.push(['theme', literal(theme, I)]);
+    if (backgroundDiffers(doc)) {
+      mount.push([
+        'background',
+        doc.background === false ? 'false' : literal(Object.entries(doc.background).map(([k, v]) => [k, str(v)]), I),
+      ]);
+    }
+    if (doc.zodiac !== false) mount.push(['zodiac', 'ring']);
+    const clock: Entry[] = [];
+    if (doc.clock.speed !== 1) clock.push(['speed', fmtNumber(doc.clock.speed)]);
+    if ((doc.clock.start ?? 0) !== 0) clock.push(['start', fmtNumber(doc.clock.start ?? 0)]);
+    if (!doc.clock.running) clock.push(['running', 'false']);
+    if (clock.length > 0) mount.push(['clock', `{ ${clock.map(([k, v]) => `${k}: ${v}`).join(', ')} }`]);
+    if (doc.params.length > 0) {
+      const params = doc.params.map((p) => {
+        const { description: _description, ...control } = p;
+        return control;
+      });
+      mount.push(['params', json(params, I)]);
+    }
+    if (doc.view.fitRadius !== 'auto') mount.push(['fit', fmtNumber(doc.view.fitRadius)]);
+    if (doc.view.minZoom !== undefined || doc.view.maxZoom !== undefined) {
+      const z: Entry[] = [];
+      if (doc.view.minZoom !== undefined) z.push(['min', fmtNumber(doc.view.minZoom)]);
+      if (doc.view.maxZoom !== undefined) z.push(['max', fmtNumber(doc.view.maxZoom)]);
+      mount.push(['zoom', `{ ${z.map(([k, v]) => `${k}: ${v}`).join(', ')} }`]);
+    }
+    mount.push(['label', str(doc.name)]);
+    const mountLiteral = mount.map(([k, v]) => (v === '' ? `${I}${k},` : `${I}${k}: ${v},`)).join('\n');
 
     const frameType = emitFrameType(doc, '  ');
     const ringModule = emitRing(doc, '  ');
@@ -717,38 +778,18 @@ ${header(doc)}
 ---
 
 <figure class="${slug}" data-${slug}>
-  <div class="stage" data-stage tabindex="0">
-    <canvas data-canvas></canvas>
-    <div class="tip" data-hover-tip hidden>
-      <span data-hover-tip-text></span>
-      <span class="sub" data-hover-tip-sub></span>
-    </div>
-  </div>
-${doc.params.length > 0 ? `  <div class="controls">\n${controls}\n  </div>\n` : ''}  <figcaption>
-    <p>${escapeHtml(doc.description ?? doc.name)}</p>
-    <div class="sr-only" data-object-list></div>
-  </figcaption>
+  <figcaption>${escapeHtml(doc.description ?? doc.name)}</figcaption>
 </figure>
 
 <style>
-  .${slug} { margin: 0; }
-  .${slug} .stage { position: relative; aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; background: ${doc.background === false ? '#070b16' : doc.background.deep}; }
-  .${slug} canvas { display: block; width: 100%; height: 100%; }
-  .${slug} .tip { position: absolute; padding: 0.4rem 0.55rem; border-radius: 6px; background: rgba(5, 8, 18, 0.96); border: 1px solid rgba(150, 168, 214, 0.22); color: #e9e6df; font-size: 0.76rem; pointer-events: none; }
-  .${slug} .tip .sub { display: block; color: #96a0bd; }
-  .${slug} .controls { display: flex; flex-wrap: wrap; gap: 0.8rem; margin-top: 0.7rem; }
-  .${slug} .ctl { display: flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: #96a0bd; }
   .${slug} figcaption { margin-top: 0.9rem; font-size: 0.84rem; line-height: 1.6; color: #96a0bd; }
-  .${slug} .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>
 
 <script>
   import {
 ${importsFor(doc, 'component').map((n) => `    ${n},`).join('\n')}
   } from ${str(from)};
-${renderersUsed(doc).length > 0 ? `  import * as renderers from ${str(rendererFrom)};\n` : ''}${emitHelperImport(doc, rendererFrom, '  ')}
-  ${emitTheme(doc).split('\n').join('\n  ')}
-${frameType ? `\n${frameType}` : ''}${ringModule ? `\n${ringModule}` : ''}
+${renderersUsed(doc).length > 0 ? `  import * as renderers from ${str(rendererFrom)};\n` : ''}${emitHelperImport(doc, rendererFrom, '  ')}${frameType ? `\n${frameType}` : ''}${ringModule ? `\n${ringModule}` : ''}
   function buildScene() {
 ${objectLines.split('\n').map((l) => (l ? `  ${l}` : l)).join('\n')}
 
@@ -758,83 +799,11 @@ ${adds};
     return { scene, ${doc.objects.map((o) => varName(o.id)).join(', ')} };
   }
 
-  function init(root: HTMLElement) {
-    const canvas = root.querySelector<HTMLCanvasElement>('[data-canvas]')!;
-    const stageEl = root.querySelector<HTMLElement>('[data-stage]')!;
-    const hover = new HoverController({
-      root: root.querySelector<HTMLElement>('[data-hover-tip]')!,
-      text: root.querySelector<HTMLElement>('[data-hover-tip-text]')!,
-      sub: root.querySelector<HTMLElement>('[data-hover-tip-sub]')!,
-    });
-
+  mountAll('[data-${slug}]', (root) => {
     const { scene${destructure} } = buildScene();
-    describeSceneInto(root.querySelector<HTMLElement>('[data-object-list]')!, scene);
-
-    const stage = new Stage({
-      canvas,
-      background: ${doc.background === false ? 'false' : literal(Object.entries(doc.background).map(([k, v]) => [k, str(v)]), '      ')},
-      zodiac: ${doc.zodiac === false ? 'false' : 'ring'},
+    return mountFigure(root, {
+${mountLiteral}
     });
-
-${paramDecls}
-${startDecl}    let pointer: Vec | null = null;
-
-    function clock(): number {
-      return ${clockBody};
-    }
-
-    function resize() {
-${fitLine}
-      draw();
-    }
-
-    function draw() {
-      const t = clock();
-      stage.render({
-        scene,
-        f: ${emitFrame(doc.params)},
-        ref: ${refVar || '{ x: 0, y: 0 }'},
-        theme: THEME,
-        hover,
-        pointer,${lightVar ? `\n        lightSource: ${lightVar},` : ''}
-      });
-    }
-${paramWiring}
-    const unwireResize = wireResize(stageEl, resize);
-    const unwireCamera = wireCamera({
-      canvas,
-      camera: stage.camera,
-      minZoom: () => stage.fit * ${fmtNumber(doc.view.minZoom ?? 0.5)},
-      maxZoom: () => stage.fit * ${fmtNumber(doc.view.maxZoom ?? 8)},
-      onChange: draw,
-      onHover: (p) => {
-        pointer = p;
-        draw();
-      },
-      onPointerDown: () => stageEl.focus({ preventScroll: true }),
-    });
-    const unwireLoop = wireAnimationLoop(stageEl, draw);
-
-    return () => {
-      unwireLoop();
-      unwireResize();
-      unwireCamera();
-      stage.destroy();
-    };
-  }
-
-  const teardowns = new Map<HTMLElement, () => void>();
-
-  function boot() {
-    for (const teardown of teardowns.values()) teardown();
-    teardowns.clear();
-    for (const root of document.querySelectorAll<HTMLElement>('[data-${slug}]')) teardowns.set(root, init(root));
-  }
-
-  document.addEventListener('astro:page-load', boot);
-  document.addEventListener('astro:before-swap', () => {
-    for (const teardown of teardowns.values()) teardown();
-    teardowns.clear();
   });
 </script>
 `;

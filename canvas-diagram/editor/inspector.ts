@@ -29,6 +29,7 @@
 
 import { clear, el, select } from './dom.js';
 import {
+  idFromName,
   isExpr,
   isRef,
   isXY,
@@ -36,9 +37,14 @@ import {
   type DiagramDoc,
   type FaceDoc,
   type ObjectDoc,
+  type AnchorDoc,
+  type SphereDoc,
 } from './doc.js';
-import { fieldsFor, GROUPS, type FieldSpec } from './fields.js';
-import { rendererNames, rendererNote } from './renderers.js';
+import { fieldsFor, GROUPS, isAdvanced, unitOf, type FieldSpec } from './fields.js';
+import { describeAs, formatDMS, formatLongitude, parseAs, UNIT_EXAMPLES, type Unit } from './units.js';
+import { getRenderer, rendererNames, rendererNote } from './renderers.js';
+import { BODIES, bodyPreset } from './bodies.js';
+import { frame } from '../scene/types.js';
 import { deletePath, getPath, setPath, type EditorState } from './state.js';
 
 /** Which control had focus when the panel was rebuilt, so it can be given it
@@ -47,28 +53,97 @@ import { deletePath, getPath, setPath, type EditorState } from './state.js';
 let focusKey: string | null = null;
 let focusCaret: number | null = null;
 
-export function renderInspector(host: HTMLElement, state: EditorState): void {
+/** A one-click way to build on the selected object — "put a sphere round
+ * this", "trail it" — offered at the top of its panel. */
+export interface QuickAction {
+  label: string;
+  title: string;
+  run: () => void;
+}
+
+/** What a reference field asks the canvas for when its ⌖ is pressed. */
+export type StartPick = (id: string, path: string, label: string, accepts: 'point' | 'dir') => void;
+
+export interface InspectorOptions {
+  actions?: QuickAction[];
+  startPick?: StartPick;
+  /** shown in place of the fields when nothing is selected */
+  empty?: HTMLElement;
+}
+
+/** Set for the duration of one render, so the reference controls deep inside
+ * it can offer "pick on the canvas" without threading it through every row. */
+let pickHandler: StartPick | undefined;
+
+/**
+ * True while the panel is being torn down to be rebuilt. Taking a focused
+ * field out of the document fires its `blur` in Chrome — so without this,
+ * every keystroke's rebuild would look like leaving the field: closing the
+ * undo run (a step per letter), and committing whatever "leaving" commits,
+ * half-typed.
+ */
+let rebuilding = false;
+
+/** Whether "More options" was open, so selecting something else, or an edit
+ * rebuilding the panel, does not snap it shut under you. */
+let moreOpen = false;
+
+export function renderInspector(host: HTMLElement, state: EditorState, opts: InspectorOptions = {}): void {
   rememberFocus(host);
-  clear(host);
+  rebuilding = true;
+  try {
+    clear(host);
+  } finally {
+    rebuilding = false;
+  }
+  pickHandler = opts.startPick;
 
   const o = state.selected();
   if (!o) {
     host.appendChild(
-      el(
-        'p',
-        { class: 'cdx-empty' },
-        'Nothing selected. Pick something in the list, or click it in the figure.',
-      ),
+      opts.empty ??
+        el('p', { class: 'cdx-empty' }, 'Nothing selected. Pick something in the list, or click it in the figure.'),
     );
     return;
   }
 
-  const specs = fieldsFor(o.kind).filter((f) => f.when === undefined || f.when(o));
+  if (opts.actions && opts.actions.length > 0) {
+    host.appendChild(el('h4', { class: 'cdx-group', text: 'Build on it' }));
+    host.appendChild(
+      el('div', { class: 'cdx-actions' },
+        ...opts.actions.map((a) => el('button', { type: 'button', text: a.label, title: a.title, onclick: a.run })),
+      ),
+    );
+  }
+
+  if (o.kind === 'sphere' || o.kind === 'anchor') host.appendChild(bodySection(o, state));
+
+  const specs = fieldsFor(o.kind).filter((f) => f.when === undefined || f.when(o, state.doc));
+  const basic = specs.filter((f) => !isAdvanced(f));
+  const advanced = specs.filter((f) => isAdvanced(f));
+
   for (const group of GROUPS) {
-    const inGroup = specs.filter((f) => f.group === group);
+    const inGroup = basic.filter((f) => f.group === group);
     if (inGroup.length === 0) continue;
     host.appendChild(el('h4', { class: 'cdx-group', text: group }));
     for (const spec of inGroup) host.appendChild(row(spec, o, state));
+  }
+
+  if (advanced.length > 0) {
+    const setCount = advanced.filter((f) => getPath(o, f.path) !== undefined).length;
+    const more = el('details', { class: 'cdx-more', ...(moreOpen ? { open: true } : {}) },
+      el('summary', { text: `More options${setCount > 0 ? ` · ${setCount} set` : ''}` }),
+    );
+    more.addEventListener('toggle', () => {
+      moreOpen = more.open;
+    });
+    for (const group of GROUPS) {
+      const inGroup = advanced.filter((f) => f.group === group);
+      if (inGroup.length === 0) continue;
+      more.appendChild(el('h4', { class: 'cdx-group', text: group }));
+      for (const spec of inGroup) more.appendChild(row(spec, o, state));
+    }
+    host.appendChild(more);
   }
 
   restoreFocus(host);
@@ -137,6 +212,10 @@ function unset(state: EditorState, id: string, path: string): void {
  */
 function rename(state: EditorState, from: string, to: string): void {
   if (to === '' || from === to) return;
+  if (state.doc.objects.some((x) => x.id === to)) return;
+  // Selection first: the edit re-renders every panel, and it must find the
+  // object under the name it is about to have, not the one it is losing.
+  if (state.selectedId === from) state.select(to);
   state.edit(
     (doc: DiagramDoc) => {
       if (doc.objects.some((x) => x.id === to)) return false;
@@ -147,7 +226,16 @@ function rename(state: EditorState, from: string, to: string): void {
     },
     { label: 'rename' },
   );
-  if (state.selectedId === from) state.select(to);
+}
+
+/** Rename an object whose id is still the one the editor made up for it, to
+ * one derived from its name. An id someone chose is left alone. */
+function adoptName(state: EditorState, id: string, name: string): void {
+  const o = state.doc.objects.find((x) => x.id === id);
+  if (!o || !new RegExp(String.raw`^${o.kind}-\d+$`).test(id)) return;
+  const next = idFromName(name, new Set(state.doc.objects.map((x) => x.id)));
+  if (next === null) return;
+  rename(state, id, next);
 }
 
 /** Point every reference at `from` to `to` — used by rename, and by delete to
@@ -203,6 +291,185 @@ function row(spec: FieldSpec, o: ObjectDoc, state: EditorState): HTMLElement {
   return el('div', { class: `cdx-field${isSet ? ' is-set' : ''}` }, head, controls, spec.help ? el('p', { class: 'cdx-help', text: spec.help }) : null);
 }
 
+/* -------------------------------------------------------------------------
+ * The body a sphere carries
+ * ---------------------------------------------------------------------- */
+
+/** The icons a body can be drawn with: a renderer, and what to call it. */
+const ICONS: readonly { render: string | null; label: string }[] = [
+  { render: null, label: 'a dot' },
+  { render: 'lit', label: 'lit from the light source' },
+  { render: 'shaded', label: 'a shaded ball' },
+  { render: 'sun', label: 'a glowing sun' },
+  { render: 'ringed', label: 'ringed, like Saturn' },
+];
+
+/** Whether it draws a body at all. A sphere: as set, or because it turns. A
+ * point: when it has been given one, in place of its marker. */
+function carriesBody(o: SphereDoc | AnchorDoc): boolean {
+  if (o.kind === 'anchor') return o.render !== undefined || o.body !== undefined;
+  return o.showBody ?? (o.speed !== undefined || o.angle !== undefined);
+}
+
+/** Which menu entry a sphere's body is: a known body, a custom one, or none. */
+function bodyChoice(o: SphereDoc | AnchorDoc): string {
+  if (!carriesBody(o)) return '';
+  if (o.body !== undefined) return o.body;
+  // a figure from before this was recorded: recognise a known body by its name
+  return BODIES.find((b) => b.name.toLowerCase() === o.name.toLowerCase())?.key ?? 'custom';
+}
+
+/**
+ * What body it is, first in its panel: none (a bare shell; a point's plain
+ * marker), one of the known bodies — which brings its name, Hebrew name,
+ * colour and icon — or a custom one, named in the field below and drawn with
+ * the icon picked here. A sphere carries its body round its rim; a point is
+ * one, where it stands.
+ */
+function bodySection(o: SphereDoc | AnchorDoc, state: EditorState): HTMLElement {
+  const choice = bodyChoice(o);
+  const edit = (fn: (t: SphereDoc | AnchorDoc) => void, label: string): void =>
+    state.edit((doc) => {
+      const t = doc.objects.find((x) => x.id === o.id);
+      if (!t || (t.kind !== 'sphere' && t.kind !== 'anchor')) return false;
+      fn(t);
+    }, { label });
+  /** show the body: a sphere draws one when told or when it turns */
+  const showIt = (t: SphereDoc | AnchorDoc): void => {
+    if (t.kind !== 'sphere') return;
+    if (t.speed !== undefined || t.angle !== undefined) delete t.showBody;
+    else t.showBody = true;
+  };
+
+  const menu = select(
+    [
+      { value: '', label: o.kind === 'sphere' ? '— nothing: a bare shell —' : '— none: just its marker —' },
+      ...BODIES.map((b) => ({ value: b.key, label: b.name })),
+      { value: 'custom', label: 'a custom body…' },
+    ],
+    choice,
+    (v) => {
+      state.breakCoalesce();
+      const preset = bodyPreset(v);
+      if (v === '') {
+        edit((t) => {
+          if (t.kind === 'sphere') t.showBody = false;
+          else delete t.render;
+          delete t.body;
+        }, 'no body');
+        return;
+      }
+      if (preset) {
+        edit((t) => {
+          t.body = preset.key;
+          t.name = preset.name;
+          t.nameHe = preset.nameHe;
+          t.color = preset.color;
+          t.dotSize = preset.dotSize;
+          // a point needs a renderer to be a body at all; the plain one will do
+          if (preset.render) t.render = { ref: preset.render };
+          else if (t.kind === 'anchor') t.render = { ref: 'plain' };
+          else delete t.render;
+          showIt(t);
+        }, `body: ${preset.name}`);
+        adoptName(state, o.id, preset.name);
+        return;
+      }
+      edit((t) => {
+        t.body = 'custom';
+        if (t.kind === 'anchor') t.render ??= { ref: 'plain' };
+        showIt(t);
+      }, 'custom body');
+    },
+    { 'data-fkey': `${o.id}:body`, title: o.kind === 'sphere' ? 'What rides this sphere' : 'What body this point is' },
+  );
+
+  const out = el('div', { class: 'cdx-bodysec' },
+    el('h4', { class: 'cdx-group', text: 'Its body' }),
+    el('div', { class: 'cdx-field is-set' }, el('div', { class: 'cdx-fcontrol' }, menu)),
+  );
+  if (choice === '') return out;
+
+  // The icon: each drawn as it would be, in this body's own colour, so the
+  // choice is made by looking rather than by reading renderer names.
+  const color = o.color ?? state.doc.theme.body;
+  const current = o.render !== undefined && isRef(o.render) && o.render.ref !== 'plain' ? o.render.ref : null;
+  const icons = el('div', { class: 'cdx-icons' });
+  for (const icon of ICONS) {
+    const on = icon.render === current;
+    const canvas = el('canvas', { width: 56, height: 56 });
+    drawIcon(canvas, icon.render, color);
+    icons.appendChild(
+      el('button', {
+        type: 'button',
+        class: `cdx-icon${on ? ' is-on' : ''}`,
+        title: icon.label,
+        'aria-pressed': on ? 'true' : 'false',
+        onclick: () =>
+          edit((t) => {
+            // a point keeps a renderer even as a dot: without one it is a marker again
+            if (icon.render !== null) t.render = { ref: icon.render };
+            else if (t.kind === 'anchor') t.render = { ref: 'plain' };
+            else delete t.render;
+            // a known body drawn differently is no longer quite that body
+            const preset = bodyPreset(t.body);
+            if (preset && (preset.render ?? null) !== icon.render) t.body = 'custom';
+          }, 'icon'),
+      }, canvas),
+    );
+  }
+  icons.appendChild(
+    el('input', {
+      type: 'color',
+      class: 'cdx-icon-color',
+      value: /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#e9e6df',
+      title: 'Its colour',
+      oninput: (e: Event) => set(state, o.id, 'color', (e.target as HTMLInputElement).value, `${o.id}:color`),
+      onchange: () => state.breakCoalesce(),
+    }),
+  );
+  out.appendChild(
+    el('div', { class: 'cdx-field is-set' },
+      el('div', { class: 'cdx-fhead' }, el('span', { class: 'cdx-fname', text: 'Icon' })),
+      el('div', { class: 'cdx-fcontrol' }, icons),
+      choice === 'custom' ? el('p', { class: 'cdx-note', text: 'Name it just below.' }) : null,
+    ),
+  );
+  return out;
+}
+
+/** One icon, drawn by its renderer exactly as the figure will draw it, lit
+ * from the upper left — at twice the size it is shown, for a sharp preview. */
+function drawIcon(canvas: HTMLCanvasElement, render: string | null, color: string): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const renderer = getRenderer(render ?? 'plain');
+  if (!renderer) return;
+  ctx.save();
+  ctx.scale(2, 2);
+  renderer(ctx, {
+    screen: { x: 14, y: 14 },
+    world: { x: 0, y: 0 },
+    r: render === 'sun' ? 5.5 : 6,
+    f: frame(0),
+    camera: { zoom: 1, pan: { x: 0, y: 0 }, cx: 0, cy: 0 },
+    color,
+    hot: false,
+    alpha: 1,
+    light: { x: -0.8, y: -0.6 },
+  });
+  ctx.restore();
+}
+
+/** What an unset checkbox field does anyway. */
+function boolDefault(spec: FieldSpec, o: ObjectDoc): boolean {
+  // a sphere draws its body when something turns it
+  if (spec.path === 'showBody' && o.kind === 'sphere') return o.speed !== undefined || o.angle !== undefined;
+  // an angle is a correction unless told otherwise
+  if (spec.path === 'short') return true;
+  return spec.fallback?.startsWith('yes') ?? false;
+}
+
 /** Fields the scene layer has no default for — clearing them would produce an
  * object that cannot be built. */
 const REQUIRED = new Set(['radius', 'vertex', 'from', 'to', 'toward', 'target', 'span', 'step']);
@@ -230,7 +497,13 @@ function buildControl(
           put(next, key);
         },
         onblur: (e: Event) => {
+          if (rebuilding) return;
           if (spec.path === 'id') rename(state, o.id, (e.target as HTMLInputElement).value.trim());
+          // An object still under the id it was born with (`sphere-2`) takes
+          // one from its name once it has a name — so the emitted code says
+          // `const moonsEpicycle`, not `const sphere2`, without anyone having
+          // to know ids exist.
+          if (spec.path === 'name') adoptName(state, o.id, (e.target as HTMLInputElement).value);
           state.breakCoalesce();
         },
       });
@@ -248,7 +521,9 @@ function buildControl(
           rows: 3,
           placeholder: spec.fallback ?? '',
           oninput: (e: Event) => put((e.target as HTMLTextAreaElement).value, key),
-          onblur: () => state.breakCoalesce(),
+          onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
           text: (value as string) ?? '',
         }),
       );
@@ -266,19 +541,23 @@ function buildControl(
       host.appendChild(withExpr(value, spec, key, put, state, () => numberInput(value as number | undefined, spec, key, put, state)));
       break;
 
-    case 'bool':
+    case 'bool': {
+      // Unset, the box shows what the scene layer will do anyway — a ticked
+      // box labelled "yes" and an empty one labelled "yes" are not the same.
+      const effective = value === undefined ? boolDefault(spec, o) : value === true;
       host.appendChild(
         el('label', { class: 'cdx-check' },
           el('input', {
             type: 'checkbox',
             'data-fkey': key,
-            ...(value === true ? { checked: true } : {}),
+            ...(effective ? { checked: true } : {}),
             onchange: (e: Event) => put((e.target as HTMLInputElement).checked),
           }),
-          el('span', { text: value === undefined ? (spec.fallback ?? 'not set') : value ? 'yes' : 'no' }),
+          el('span', { text: value === undefined ? `${effective ? 'yes' : 'no'} (default)` : value ? 'yes' : 'no' }),
         ),
       );
       break;
+    }
 
     case 'boolLike':
       host.appendChild(
@@ -324,7 +603,9 @@ function buildControl(
             value: (value as string) ?? '',
             placeholder: spec.fallback ?? '',
             oninput: (e: Event) => put((e.target as HTMLInputElement).value, key),
-            onblur: () => state.breakCoalesce(),
+            onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
           }),
         ),
       );
@@ -356,7 +637,9 @@ function buildControl(
             if (text.trim() === '') unset(state, o.id, spec.path);
             else put({ expr: text }, key);
           },
-          onblur: () => state.breakCoalesce(),
+          onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
         }),
       );
       break;
@@ -383,7 +666,9 @@ function buildControl(
               .filter((s) => s !== '');
             put(parts, key);
           },
-          onblur: () => state.breakCoalesce(),
+          onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
         }),
       );
       break;
@@ -447,7 +732,9 @@ function withExpr(
         spellcheck: 'false',
         value: (value as { expr: string }).expr,
         oninput: (e: Event) => put({ expr: (e.target as HTMLInputElement).value }, key),
-        onblur: () => state.breakCoalesce(),
+        onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
       })
     : plain();
 
@@ -469,6 +756,9 @@ function numberInput(
   put: (v: unknown, coalesce?: string) => void,
   state: EditorState,
 ): HTMLElement {
+  const o = state.selected();
+  const unit = o ? unitOf(spec, o) : undefined;
+  if (unit) return preciseInput(value, unit, spec, key, put, state, o ? senseToggle(spec, o, state) : null);
   return el('input', {
     type: 'number',
     'data-fkey': key,
@@ -482,8 +772,129 @@ function numberInput(
       if (raw === '') return;
       put(Number(raw), key);
     },
-    onblur: () => state.breakCoalesce(),
+    onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
   });
+}
+
+/**
+ * A number stated precisely, in whatever form its source uses.
+ *
+ * Text, not `type=number`: `13°10′35″`, `26°45′ Gemini` and `2;30/60` are
+ * all numbers, and a number box refuses every one of them. It commits on
+ * Enter or on leaving the field rather than per keystroke, because "13°1" is
+ * on the way to "13°10′35″" and not a value anyone meant; until then the line
+ * beneath says what it will be read as, so a typo shows before it lands.
+ */
+function preciseInput(
+  value: number | undefined,
+  unit: Unit,
+  spec: FieldSpec,
+  key: string,
+  put: (v: unknown, coalesce?: string) => void,
+  state: EditorState,
+  extra: HTMLElement | null,
+): HTMLElement {
+  const clockUnit = (state.doc.clock.unit ?? 'day').replace(/s$/, '') || 'day';
+  const shown = value === undefined ? '' : formatAs(unit, value);
+  const readout = el('div', { class: 'cdx-readout' });
+  const say = (v: number | null, typed: string): void => {
+    if (v === null) {
+      readout.textContent = typed.trim() === '' ? '' : `Can’t read that — try ${UNIT_EXAMPLES[unit]}`;
+      readout.classList.toggle('is-bad', typed.trim() !== '');
+      return;
+    }
+    readout.classList.remove('is-bad');
+    // a motion's sense lives beside it, in `clockwise`, and the readout says it
+    const o = state.selected();
+    const sense = unit === 'rate' && o?.kind === 'sphere' && o.clockwise === true ? -1 : 1;
+    readout.textContent = `= ${describeAs(unit, v * sense, clockUnit)}`;
+  };
+
+  const commit = (): void => {
+    const text = input.value.trim();
+    // left as it was shown: nothing was typed, and re-reading a rounded
+    // display would nudge an exact value by its last shown digit
+    if (text === shown || text === '') return;
+    const v = parseAs(unit, text);
+    if (v === null) return;
+    state.breakCoalesce();
+    put(v);
+  };
+
+  const input = el('input', {
+    type: 'text',
+    class: 'cdx-precise',
+    'data-fkey': key,
+    value: shown,
+    placeholder: spec.fallback ?? UNIT_EXAMPLES[unit],
+    spellcheck: 'false',
+    title: `Type it as your source gives it — ${UNIT_EXAMPLES[unit]}`,
+    oninput: () => say(parseAs(unit, input.value), input.value),
+    onkeydown: (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commit();
+      } else if (e.key === 'Escape') {
+        input.value = shown;
+        say(value ?? null, shown);
+
+  // A button beside the box (↻) must not steal focus on the way to being
+  // clicked: the blur would commit and rebuild the panel under the pointer,
+  // and the click would land on nothing. So it keeps focus where it is, and
+  // commits whatever was typed before doing its own thing.
+  if (extra) {
+    extra.addEventListener('pointerdown', (e) => e.preventDefault());
+    extra.addEventListener('click', () => commit(), { capture: true });
+  }
+      }
+    },
+    onblur: () => {
+      if (!rebuilding) commit();
+    },
+  });
+  say(value ?? null, shown);
+
+  return el('div', { class: 'cdx-stack' }, extra ? el('div', { class: 'cdx-fx-row' }, input, extra) : input, readout);
+}
+
+/**
+ * ↺ or ↻ beside a sphere's motion. Which way it turns is a property of the
+ * motion, not a digit of it — so it is a switch beside the number, rather
+ * than a minus sign someone has to know to type (and then remember applies
+ * to the starting point too).
+ */
+function senseToggle(spec: FieldSpec, o: ObjectDoc, state: EditorState): HTMLElement | null {
+  if (spec.path !== 'speed' || o.kind !== 'sphere') return null;
+  const cw = o.clockwise === true;
+  return el('button', {
+    type: 'button',
+    class: 'cdx-sense',
+    text: cw ? '↻' : '↺',
+    title: cw ? 'Turns clockwise — press for anticlockwise' : 'Turns anticlockwise — press for clockwise',
+    onclick: () => {
+      state.breakCoalesce();
+      if (cw) unset(state, o.id, 'clockwise');
+      else set(state, o.id, 'clockwise', true);
+    },
+  });
+}
+
+/** How a value is shown in its box: the form the sources use, to enough
+ * places that nothing typed is lost to the display. */
+function formatAs(unit: Unit, v: number): string {
+  switch (unit) {
+    case 'angle':
+      return formatDMS(v, 2);
+    case 'bearing':
+      return formatLongitude(v, 2);
+    case 'rate':
+      return formatDMS(v, 2);
+    case 'ratio':
+    case 'length':
+      return String(Math.round(v * 1e8) / 1e8);
+  }
 }
 
 function numField(value: number, step: number, onChange: (n: number) => void, key: string, label: string): HTMLElement {
@@ -524,7 +935,9 @@ function colorControl(
       value: hex,
       title: 'Pick a colour — for one with transparency, type it beside this',
       oninput: (e: Event) => put((e.target as HTMLInputElement).value, key),
-      onblur: () => state.breakCoalesce(),
+      onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
     }),
     el('input', {
       type: 'text',
@@ -533,7 +946,9 @@ function colorControl(
       placeholder: spec.fallback ?? '',
       spellcheck: 'false',
       oninput: (e: Event) => put((e.target as HTMLInputElement).value, key),
-      onblur: () => state.breakCoalesce(),
+      onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
     }),
   );
 }
@@ -555,7 +970,9 @@ function faceControl(
       placeholder: spec.fallback ?? 'a CSS font shorthand',
       spellcheck: 'false',
       oninput: (e: Event) => put({ css: (e.target as HTMLInputElement).value, px: face.px }, key),
-      onblur: () => state.breakCoalesce(),
+      onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
     }),
     numField(face.px, 0.5, (px) => put({ css: face.css, px }, key), `${key}:px`, 'px'),
   );
@@ -630,11 +1047,31 @@ function pointControl(
               spellcheck: 'false',
               value: (value as { expr: string }).expr,
               oninput: (e: Event) => put({ expr: (e.target as HTMLInputElement).value }, key),
-              onblur: () => state.breakCoalesce(),
+              onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
             })
           : null;
 
-  return el('div', { class: 'cdx-stack' }, picker, body);
+  return el('div', { class: 'cdx-stack' }, withPick(picker, o, spec, 'point'), body);
+}
+
+/** The reference picker, with a ⌖ beside it that hands the choice to the
+ * canvas: press it, click the thing you mean. Choosing "the sun" out of a
+ * list of ids is the slow way to say what pointing at it says at once. */
+function withPick(picker: HTMLElement, o: ObjectDoc, spec: FieldSpec, accepts: 'point' | 'dir'): HTMLElement {
+  if (!pickHandler) return picker;
+  const start = pickHandler;
+  return el('div', { class: 'cdx-fx-row' },
+    picker,
+    el('button', {
+      class: 'cdx-pick',
+      type: 'button',
+      text: 'Pick',
+      title: `Pick “${spec.label}” on the canvas — click the object you mean`,
+      onclick: () => start(o.id, spec.path, spec.label, accepts),
+    }),
+  );
 }
 
 /** A `DirectionLike`: a bearing, an object to sight at, or an expression.
@@ -677,21 +1114,7 @@ function dirControl(
 
   const body =
     mode === 'deg'
-      ? el('div', { class: 'cdx-pair' },
-          el('input', {
-            type: 'number',
-            'data-fkey': key,
-            value: value as number,
-            step: 1,
-            title: 'Degrees anticlockwise from due east — 0 is right, 90 is up',
-            oninput: (e: Event) => {
-              const raw = (e.target as HTMLInputElement).value;
-              if (raw !== '') put(Number(raw), key);
-            },
-            onblur: () => state.breakCoalesce(),
-          }),
-          el('span', { class: 'cdx-unit', text: '° from east, anticlockwise' }),
-        )
+      ? preciseInput(value as number, unitOf(spec, o) ?? 'bearing', spec, key, put, state, null)
       : mode === 'ref'
         ? select(options, (value as { ref: string }).ref, (v) => put({ ref: v }), { 'data-fkey': key })
         : mode === 'expr'
@@ -702,11 +1125,13 @@ function dirControl(
               spellcheck: 'false',
               value: (value as { expr: string }).expr,
               oninput: (e: Event) => put({ expr: (e.target as HTMLInputElement).value }, key),
-              onblur: () => state.breakCoalesce(),
+              onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
             })
           : null;
 
-  return el('div', { class: 'cdx-stack' }, picker, body);
+  return el('div', { class: 'cdx-stack' }, withPick(picker, o, spec, 'dir'), body);
 }
 
 function rendererControl(
@@ -757,7 +1182,9 @@ function rendererControl(
           spellcheck: 'false',
           value: (value as { expr: string }).expr,
           oninput: (e: Event) => put({ expr: (e.target as HTMLInputElement).value }, key),
-          onblur: () => state.breakCoalesce(),
+          onblur: () => {
+          if (!rebuilding) state.breakCoalesce();
+        },
         })
       : null,
   );
