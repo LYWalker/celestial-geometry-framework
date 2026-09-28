@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Sphere, nester } from '../canvas-diagram/scene/sphere.js';
 import { Anchor } from '../canvas-diagram/scene/anchor.js';
 import { frame } from '../canvas-diagram/scene/types.js';
-import { nearVec } from './helpers/near.js';
+import { near, nearVec } from './helpers/near.js';
 
 describe('Sphere.position', () => {
   test('plain circular: centred on the origin, fixed angle', () => {
@@ -113,5 +113,39 @@ describe('nester', () => {
     assert.equal(n.next(), 15);
     assert.equal(n.next(), 20);
     assert.equal(n.next(), 25);
+  });
+});
+
+describe('Sphere — counted from its carrier, turning clockwise (the Rambam’s own terms)', () => {
+  // 14:1–3, the plain model: the large sphere carries the small one at the
+  // mean motion; the moon runs the small sphere the other way at its course,
+  // counted from the far point — the end of the line out from the earth.
+  const MEAN = 13 + 10 / 60 + 35 / 3600;
+  const COURSE = 13 + 3 / 60 + 54 / 3600;
+  const earth = new Anchor({ id: 'earth', name: 'the earth' });
+  const large = new Sphere({ id: 'large', name: 'large', center: earth, radius: 90, speed: MEAN, phase: 40 });
+  const small = new Sphere({
+    id: 'small',
+    name: 'small',
+    center: large,
+    radius: 10,
+    speed: COURSE,
+    phase: 30,
+    countFrom: 'carrier',
+    clockwise: true,
+  });
+
+  test('its bearing is the carrier’s, less its own course', () => {
+    for (const t of [0, 1, 7.5, 100]) {
+      const f = frame(t);
+      const want = (((40 + MEAN * t - (30 + COURSE * t)) % 360) + 360) % 360;
+      assert.ok(near(small.angleAt(f), want, 1e-9), `t=${t}: ${small.angleAt(f)} vs ${want}`);
+    }
+  });
+
+  test('clockwise alone is the same as negating the motion', () => {
+    const a = new Sphere({ id: 'a', name: 'a', radius: 10, speed: 5, phase: 20, clockwise: true });
+    const b = new Sphere({ id: 'b', name: 'b', radius: 10, speed: -5, phase: -20 });
+    for (const t of [0, 3, 50]) assert.ok(near(a.angleAt(frame(t)), b.angleAt(frame(t)), 1e-9));
   });
 });

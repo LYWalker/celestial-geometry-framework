@@ -6,7 +6,16 @@
  */
 
 import type { Vec } from '../geometry.js';
-import { type Frame, type Meta, type PointLike, type Positioned, ORIGIN, SceneObject, resolvePoint } from './types.js';
+import {
+  type BodyRenderer,
+  type Frame,
+  type Meta,
+  type PointLike,
+  type Positioned,
+  ORIGIN,
+  SceneObject,
+  resolvePoint,
+} from './types.js';
 
 export interface AnchorConfig extends Meta {
   /** where it sits — fixed, or itself riding another object. Default: the origin. */
@@ -16,8 +25,15 @@ export interface AnchorConfig extends Meta {
    * as against a bare crossing of two lines. 'none' is for a point that
    * exists only for other objects to reference and is never itself drawn. */
   marker?: 'cross' | 'crosshair' | 'dot' | 'none';
-  /** px radius of the drawn marker */
+  /** px radius of the drawn marker, or of the body */
   dotSize?: number;
+  /**
+   * Draw a body here instead of a marker — the same renderers a Sphere's
+   * carried body takes (a lit disc, a glowing sun). For a point that *is* a
+   * body: the earth at the centre of the world, the sun at the centre of the
+   * modern one. `marker` is then not drawn.
+   */
+  render?: BodyRenderer;
 }
 
 export class Anchor extends SceneObject<AnchorConfig> implements Positioned {

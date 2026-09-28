@@ -97,6 +97,24 @@ export interface SphereConfig extends Meta {
    * `angle: (f) => rambamSun(f.t).mean`). Takes precedence over
    * `speed`/`phase` when given. */
   angle?: Scalar;
+  /**
+   * What `angle`, or `phase` and `speed`, are counted from. `'east'` (the
+   * default) is an ordinary bearing. `'carrier'` counts from the line the
+   * sphere this one is centred on carries it along — its own `angleAt` — which
+   * is how the Rambam states an epicycle's motion: the moon's course (14:3) is
+   * reckoned on the small sphere from its far point, the end of the line out
+   * from the earth, not from a fixed direction in the sky. Stated that way,
+   * the text's own number goes in unchanged.
+   */
+  countFrom?: 'east' | 'carrier';
+  /**
+   * Turns clockwise: `angle`, or `phase` and `speed`, are counted clockwise
+   * rather than the usual anticlockwise. The same as negating them, but it
+   * lets a motion the source states as a positive number in its own
+   * direction — the moon's course on the small sphere, which turns against
+   * the large one (14:3) — go in as that number.
+   */
+  clockwise?: boolean;
   /** tip this sphere's plane out of the page (see PlaneConfig). Its rim
    * then draws as an ellipse rather than a circle, and the carried point
    * gains a real depth, which `depthAt()` reports. Cannot be combined with
@@ -242,16 +260,31 @@ export class Sphere extends SceneObject<SphereConfig> implements Positioned {
   }
 
   /** The carried point's bearing — from `angle` if given, else a constant
-   * rate from `phase`/`speed`. Measured from this sphere's own centre. */
+   * rate from `phase`/`speed`, plus the carrier's own bearing under
+   * `countFrom: 'carrier'`. Measured from this sphere's own centre. */
   angleAt(f: Frame): number {
     this.resetIfStale(f);
     if (this.memoAngle === undefined) {
-      this.memoAngle =
-        this.cfg.angle !== undefined
-          ? norm360(resolveScalar(this.cfg.angle, f))
-          : norm360((this.cfg.phase ?? 0) + (this.cfg.speed ?? 0) * f.t);
+      const own =
+        (this.cfg.clockwise ? -1 : 1) *
+        (this.cfg.angle !== undefined
+          ? resolveScalar(this.cfg.angle, f)
+          : (this.cfg.phase ?? 0) + (this.cfg.speed ?? 0) * f.t);
+      this.memoAngle = norm360(own + (this.cfg.countFrom === 'carrier' ? this.carrierBearing(f) : 0));
     }
     return this.memoAngle;
+  }
+
+  /** The bearing the sphere this one rides is carrying it along — the zero
+   * that `countFrom: 'carrier'` counts from. Zero when it rides nothing that
+   * turns. */
+  private carrierBearing(f: Frame): number {
+    const c = this.cfg.center as unknown;
+    if (c !== null && typeof c === 'object' && typeof (c as { angleAt?: unknown }).angleAt === 'function') {
+      const a = (c as { angleAt: (f: Frame) => number }).angleAt(f);
+      return Number.isFinite(a) ? a : 0;
+    }
+    return 0;
   }
 
   /** This sphere's plane at this moment, or null when it lies flat in the

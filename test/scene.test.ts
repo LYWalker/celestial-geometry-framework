@@ -223,3 +223,51 @@ describe('Scene trail anchoring (regression: a followed body left its trail behi
     assert.ok(near(scene.extent(frame(2)), 100));
   });
 });
+
+describe('Scene.hitTest', () => {
+  // camera centred on the origin at zoom 1, so world and screen coincide
+  const camera = makeCamera();
+  const f = frame(0);
+  const earth = new Anchor({ id: 'earth', name: 'The earth', marker: 'cross' });
+  const shell = new Sphere({ id: 'shell', name: 'A bare shell', center: earth, radius: 100, showBody: false });
+  const sun = new Sphere({ id: 'sun', name: 'The sun', center: earth, radius: 50, angle: 0 });
+  const line = new Connector({ id: 'line', name: 'A line', from: { x: -40, y: 80 }, to: { x: 40, y: 80 } });
+  const scene = new Scene().add(earth).add(shell).add(sun).add(line);
+  const at = (x: number, y: number, shapes?: boolean) =>
+    scene.hitTest({ x, y }, { f, ref: { x: 0, y: 0 }, camera, ...(shapes !== undefined ? { shapes } : {}) })?.id ?? null;
+
+  test('a rim or a line is not hit by default, so a figure that follows clicks never follows a bare shell', () => {
+    assert.equal(at(0, -100), null);
+    assert.equal(at(30, 80), null);
+  });
+
+  test('with shapes, anywhere on a rim or along a line is a hit', () => {
+    assert.equal(at(0, -100, true), 'shell');
+    assert.equal(at(-100, 0, true), 'shell');
+    assert.equal(at(30, 80, true), 'line');
+  });
+
+  test('a body still wins over the rim it rides', () => {
+    // the sun's body sits at (50, 0), on its own rim
+    assert.equal(at(50, 0, true), 'sun');
+  });
+});
+
+describe('an Anchor drawn as a body', () => {
+  test('draws through its renderer instead of a marker, and is hit even with no marker', () => {
+    const calls: { r: number; color: string }[] = [];
+    const sun = new Anchor({
+      id: 'sun',
+      name: 'the sun',
+      marker: 'none',
+      color: '#e0b45c',
+      dotSize: 8,
+      render: (_ctx, b) => calls.push({ r: b.r, color: b.color }),
+    });
+    const scene = new Scene().add(sun);
+    scene.draw({ ctx: makeFakeCtx(), f: frame(0), ref: sun, camera: makeCamera(), theme: THEME });
+    assert.deepEqual(calls, [{ r: 8, color: '#e0b45c' }]);
+    const hit = scene.hitTest({ x: 0, y: 0 }, { f: frame(0), ref: sun, camera: makeCamera() });
+    assert.equal(hit?.id, 'sun');
+  });
+});

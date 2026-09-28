@@ -169,7 +169,7 @@ export interface ZodiacConfig {
   fit?: 'frame' | 'grow';
   /** how wide the band of names is, world px. Default 18% of the radius. */
   band?: number;
-  segments: ZodiacSegment[];
+  segments: readonly ZodiacSegment[];
   /** which name each segment is drawn under: its own, or its `nameHe`.
    * Hebrew is drawn as it is written rather than upper-cased, which the
    * script has no notion of. Default 'en'. */

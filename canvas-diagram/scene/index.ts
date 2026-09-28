@@ -50,3 +50,5 @@ export * from './transitions.js';
 export * from './selection.js';
 export * from './describe.js';
 export * from './stage.js';
+export * from './defaults.js';
+export * from './figure.js';

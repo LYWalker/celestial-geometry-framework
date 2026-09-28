@@ -19,7 +19,7 @@
  * units, and would scale wrongly under a zoomed-in transform.
  */
 
-import { FULL_CIRCLE, sub, unit, type PlanePoint, type Vec } from '../geometry.js';
+import { distToSegment, FULL_CIRCLE, sub, unit, type PlanePoint, type Vec } from '../geometry.js';
 import { applyCamera, worldToScreen, type Camera } from '../camera.js';
 import type { Face, Label, LabelTheme } from '../labels.js';
 import type { HoverController } from '../hover.js';
@@ -365,51 +365,75 @@ export class Scene {
 
   /** Which object (if any) is under a screen point — for a click handler
    * that wants "what did they hit" without re-deriving worldToScreen()
-   * per object itself. Tests each object's single representative point
-   * (a Sphere's carried body, an Anchor with a drawn marker, an Angle's
-   * midpoint, a Connector's midpoint); bare shells, an Anchor with
-   * `marker: 'none'`, and Trails have no one point and are skipped — as is
-   * anything currently faded to invisible via `opacity`. */
-  hitTest(screenPt: Vec, opts: { f: Frame; ref: PointLike; camera: Camera; threshold?: number }): SceneItem | null {
+   * per object itself. Tests each object's representative point — a
+   * Sphere's carried body, an Anchor's marker, an Angle's arc, a Connector's
+   * midpoint, a RingMarker's dot. With `shapes: true` it also tests the
+   * shapes themselves — a Sphere's whole rim, a Connector's whole length —
+   * which is what "click the thing you can see" needs, and what a figure that
+   * *follows* whatever is clicked does not (a bare shell has nothing to
+   * follow). A point still wins over a shape it overlaps, so a body riding a
+   * rim is the body. A Trail, an Anchor with `marker: 'none'`, and anything
+   * faded to invisible via `opacity` are never hit. */
+  hitTest(
+    screenPt: Vec,
+    opts: { f: Frame; ref: PointLike; camera: Camera; threshold?: number; shapes?: boolean },
+  ): SceneItem | null {
     const ref = resolvePoint(opts.ref, opts.f);
     const toScreen = (p: Vec) => worldToScreen(p, ref, opts.camera);
     const threshold = opts.threshold ?? 14;
+    // A shape has to be nearer than this to beat a point: the rim a body
+    // rides passes straight under it, and the body is what was meant.
+    const SHAPE_PENALTY = 6;
     let best: SceneItem | null = null;
     let bestDist = threshold;
+    const consider = (item: SceneItem, d: number): void => {
+      if (Number.isFinite(d) && d < bestDist) {
+        bestDist = d;
+        best = item;
+      }
+    };
+    const pointDist = (p: Vec): number => {
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Infinity;
+      const s = toScreen(p);
+      return Math.hypot(s.x - screenPt.x, s.y - screenPt.y);
+    };
 
     for (const item of this.items) {
       if (resolveScalar(item.cfg.opacity ?? 1, opts.f) <= 0.003) continue;
-      let p: Vec | null = null;
       switch (item.kind) {
-        case 'sphere':
-          if (item.showBody) p = item.position(opts.f);
+        case 'sphere': {
+          if (item.showBody) consider(item, pointDist(item.position(opts.f)));
+          // A tilted rim draws as an ellipse; only a flat one is a circle
+          // this can measure against.
+          if (opts.shapes && item.showRing && item.cfg.plane === undefined) {
+            const c = item.centerAt(opts.f);
+            const d = pointDist(c);
+            const r = item.radiusAt(opts.f) * opts.camera.zoom;
+            consider(item, Math.abs(d - r) + SHAPE_PENALTY);
+          }
           break;
+        }
         case 'anchor':
-          if ((item.cfg.marker ?? 'cross') !== 'none') p = item.position(opts.f);
+          if ((item.cfg.marker ?? 'cross') !== 'none' || item.cfg.render) consider(item, pointDist(item.position(opts.f)));
           break;
         case 'angle':
-          p = item.midAt(opts.f);
+          consider(item, pointDist(item.midAt(opts.f)));
           break;
         case 'connector': {
           const a = item.fromAt(opts.f);
           const b = item.toAt(opts.f);
-          p = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          if (![a.x, a.y, b.x, b.y].every(Number.isFinite)) break;
+          if (opts.shapes) consider(item, distToSegment(screenPt, toScreen(a), toScreen(b)) + SHAPE_PENALTY);
+          else consider(item, pointDist({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }));
           break;
         }
         case 'ringmarker':
-          p = item.position(opts.f);
+          consider(item, pointDist(item.position(opts.f)));
           break;
         case 'trail':
           break;
         default:
           assertNever(item);
-      }
-      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
-      const s = toScreen(p);
-      const d = Math.hypot(s.x - screenPt.x, s.y - screenPt.y);
-      if (d < bestDist) {
-        bestDist = d;
-        best = item;
       }
     }
     return best;
@@ -603,12 +627,22 @@ export class Scene {
           case 'anchor': {
             const p = item.position(f);
             if (this.checkFinite(item.id, p)) break;
-            const color = item.cfg.color ?? theme.centerMark;
-            const marker = item.cfg.marker ?? 'cross';
+            const renderer = item.cfg.render;
+            const color = item.cfg.color ?? (renderer ? theme.body : theme.centerMark);
+            // a point drawn as a body is always drawn, whatever its marker says
+            const marker = renderer ? 'body' : (item.cfg.marker ?? 'cross');
             const screenP = toScreen(p);
 
             ctx.globalAlpha = opacity * ambientAlpha;
-            if (marker === 'cross' || marker === 'crosshair')
+            if (renderer) {
+              const alpha = opacity * ambientAlpha;
+              const r = item.cfg.dotSize ?? 5;
+              pendingBodies.push(() => {
+                const light = lightScreen !== undefined ? unit(sub(lightScreen, screenP)) : undefined;
+                // run after this loop, by which time `hot` (below) is this frame's
+                renderer(ctx, { screen: screenP, world: p, r, f, camera, color, hot, alpha, light });
+              });
+            } else if (marker === 'cross' || marker === 'crosshair')
               drawCenterMark(ctx, p, camera.zoom, color, item.cfg.dotSize ?? 5, marker === 'crosshair');
             else if (marker === 'dot') {
               ctx.fillStyle = color;
