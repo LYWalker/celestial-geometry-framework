@@ -44,6 +44,24 @@ export interface FigureParam {
   step?: number;
   /** where it starts */
   value: number;
+  /** its value as shown beside the slider — `(v) => \`×${v}\``. No readout when omitted. */
+  format?: (value: number) => string;
+}
+
+/**
+ * The clock's own control: a pause button, and a slider over one turn of
+ * the clock, shown in whatever the clock measures — degrees round a circle,
+ * days of a month. The clock is read modulo `max - min`, so a clock that
+ * runs past the end comes round to the start again.
+ */
+export interface ClockControl {
+  /** what the slider is labelled — "The sun's course" */
+  label: string;
+  min: number;
+  max: number;
+  step?: number;
+  /** the clock's reading as shown beside the slider */
+  format?: (t: number) => string;
 }
 
 export interface FigureOptions {
@@ -63,8 +81,11 @@ export interface FigureOptions {
    * How the clock runs: `speed` units of `f.t` per real second, from `start`.
    * `running: false` holds it at `start` — a still figure that still pans,
    * zooms and explains itself on hover.
+   *
+   * `control: true` puts a pause button under the figure (Space does the
+   * same while it has focus); a ClockControl adds a slider on the clock.
    */
-  clock?: { speed?: number; start?: number; running?: boolean };
+  clock?: { speed?: number; start?: number; running?: boolean; control?: boolean | ClockControl };
   /** named amounts besides the clock, each given a control under the figure */
   params?: FigureParam[];
   /**
@@ -138,9 +159,38 @@ export function mountFigure(host: HTMLElement, opts: FigureOptions): Figure {
   /* ---- parameters ----------------------------------------------------- */
   const params: Record<string, number> = {};
   const inputs = new Map<string, HTMLInputElement>();
-  if (opts.params && opts.params.length > 0) {
+  const outputs = new Map<string, HTMLOutputElement>();
+  const clockCtl = opts.clock?.control;
+  let playButton: HTMLButtonElement | null = null;
+  let scrub: { input: HTMLInputElement; out: HTMLOutputElement | null; ctl: ClockControl } | null = null;
+  if ((opts.params && opts.params.length > 0) || clockCtl) {
     const controls = el('div', 'cgf-controls');
-    for (const p of opts.params) {
+    if (clockCtl) {
+      playButton = document.createElement('button');
+      playButton.type = 'button';
+      playButton.className = 'cgf-play';
+      playButton.addEventListener('click', () => (running ? pause() : play()));
+      controls.append(playButton);
+      if (typeof clockCtl === 'object') {
+        const input = document.createElement('input');
+        input.type = 'range';
+        input.min = String(clockCtl.min);
+        input.max = String(clockCtl.max);
+        input.step = String(clockCtl.step ?? (clockCtl.max - clockCtl.min) / 360);
+        // taking hold of the slider stops the clock, so it stays where it is put
+        input.addEventListener('input', () => {
+          if (running) pause();
+          seek(Number(input.value));
+        });
+        const out = clockCtl.format ? (el('output', '') as HTMLOutputElement) : null;
+        const label = el('label', 'cgf-ctl');
+        label.append(el('span', '', clockCtl.label), input);
+        if (out) label.append(out);
+        controls.append(label);
+        scrub = { input, out, ctl: clockCtl };
+      }
+    }
+    for (const p of opts.params ?? []) {
       params[p.key] = p.value;
       const input = document.createElement('input');
       if (p.control === 'toggle') {
@@ -158,6 +208,11 @@ export function mountFigure(host: HTMLElement, opts: FigureOptions): Figure {
       inputs.set(p.key, input);
       const label = el('label', 'cgf-ctl');
       label.append(el('span', '', p.label ?? p.key), input);
+      if (p.format) {
+        const out = el('output', '', p.format(p.value)) as HTMLOutputElement;
+        outputs.set(p.key, out);
+        label.append(out);
+      }
       controls.append(label);
     }
     added.push(controls);
@@ -198,8 +253,53 @@ export function mountFigure(host: HTMLElement, opts: FigureOptions): Figure {
       pointer,
       ...(opts.light !== undefined ? { lightSource: opts.light } : {}),
     });
+    if (scrub) {
+      const { min, max, format } = scrub.ctl;
+      const span = max - min;
+      const t = min + ((((last.t - min) % span) + span) % span);
+      scrub.input.value = String(t);
+      if (scrub.out && format) scrub.out.textContent = format(t);
+    }
     opts.onFrame?.(last);
   }
+
+  function showRunning(): void {
+    if (!playButton) return;
+    playButton.textContent = running ? 'Pause' : 'Play';
+    playButton.setAttribute('aria-label', running ? 'Pause' : 'Play');
+  }
+  showRunning();
+
+  function play(): void {
+    if (running) return;
+    since = performance.now();
+    running = true;
+    showRunning();
+    draw();
+  }
+
+  function pause(): void {
+    if (!running) return;
+    base = clock();
+    running = false;
+    showRunning();
+    draw();
+  }
+
+  function seek(t: number): void {
+    base = t;
+    since = performance.now();
+    draw();
+  }
+
+  // Space pauses and plays, while the figure has focus
+  const onKey = (e: KeyboardEvent): void => {
+    if (!clockCtl || e.key !== ' ' || document.activeElement !== stageEl) return;
+    e.preventDefault();
+    if (running) pause();
+    else play();
+  };
+  stageEl.addEventListener('keydown', onKey);
 
   function resize(): void {
     let fit: number;
@@ -219,6 +319,9 @@ export function mountFigure(host: HTMLElement, opts: FigureOptions): Figure {
       if (input.type === 'checkbox') input.checked = value !== 0;
       else input.value = String(value);
     }
+    const out = outputs.get(key);
+    const format = opts.params?.find((p) => p.key === key)?.format;
+    if (out && format) out.textContent = format(value);
     draw();
   }
 
@@ -254,25 +357,12 @@ export function mountFigure(host: HTMLElement, opts: FigureOptions): Figure {
     },
     frame: () => last,
     set,
-    play(): void {
-      if (running) return;
-      since = performance.now();
-      running = true;
-      draw();
-    },
-    pause(): void {
-      if (!running) return;
-      base = clock();
-      running = false;
-      draw();
-    },
-    seek(t: number): void {
-      base = t;
-      since = performance.now();
-      draw();
-    },
+    play,
+    pause,
+    seek,
     draw,
     destroy(): void {
+      stageEl.removeEventListener('keydown', onKey);
       unwireLoop();
       unwireCamera();
       unwireResize();
@@ -337,8 +427,12 @@ const FIGURE_CSS = `
 .cgf-tip { position: absolute; top: 0; left: 0; z-index: 2; max-width: 16rem; padding: 0.35rem 0.55rem; border-radius: 6px; background: rgba(5, 8, 18, 0.96); border: 1px solid rgba(150, 168, 214, 0.22); color: #e9e6df; font: 500 0.74rem/1.35 "Inter Variable", Inter, system-ui, sans-serif; pointer-events: none; }
 .cgf-tip-text { display: block; font-weight: 600; }
 .cgf-tip-sub { display: block; margin-top: 0.15rem; color: #96a0bd; }
-.cgf-controls { display: flex; flex-wrap: wrap; gap: 0.8rem; margin-top: 0.7rem; }
-.cgf-ctl { display: flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: #96a0bd; }
+.cgf-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1.1rem; margin-top: 0.7rem; }
+.cgf-ctl { display: flex; align-items: center; gap: 0.45rem; font-size: 0.78rem; color: #96a0bd; }
+.cgf-ctl input[type='range'] { width: 8rem; }
+.cgf-ctl output { min-width: 3.2rem; color: #e9e6df; font-variant-numeric: tabular-nums; }
+.cgf-play { min-width: 4.2rem; padding: 0.3rem 0.7rem; border-radius: 6px; border: 1px solid rgba(150, 168, 214, 0.3); background: rgba(13, 21, 38, 0.8); color: #e9e6df; font-family: inherit; font-size: 0.78rem; cursor: pointer; }
+.cgf-play:hover { background: rgba(143, 179, 230, 0.16); }
 .cgf-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 `;
 
