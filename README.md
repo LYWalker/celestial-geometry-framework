@@ -37,7 +37,7 @@ import { mountEditor } from 'celestial-geometry-framework/editor';
 
 The primitives (`geometry.ts`, `camera.ts`, `annotate.ts`, `labels.ts`,
 `hover.ts`) are also usable on their own, without the scene layer at all —
-that's how `components/Orrery.astro` is built, by hand, as the benchmark the
+that's how the lwalker.dev site's `Orrery.astro` is built, by hand, as the benchmark the
 scene layer is measured against (see below).
 
 ## Quickstart
@@ -86,8 +86,8 @@ after each Astro navigation, and tears each down when its page goes.
 
 A figure that needs more control than that can still assemble the pieces by
 hand — `Stage`, `HoverController`, `wireCamera`, `wireResize`,
-`wireAnimationLoop` — which is how the figures in `components/` predating
-`mountFigure` are written, and what it does inside.
+`wireAnimationLoop` — which is how the figures predating `mountFigure` are
+written, and what it does inside.
 
 ### Stating motions the way the text does
 
@@ -388,9 +388,9 @@ the gap those examples exist to find.
 
 ## `Orrery.astro` vs `OrreryFw.astro`: a deliberate benchmark
 
-`components/Orrery.astro` (hand-built, ~3600 lines) and
-`components/OrreryFw.astro` (framework-built on the scene layer, ~2800
-lines) are **not** an abandoned duplicate — they're a deliberate side-by-side
+`Orrery.astro` (hand-built, ~3600 lines) and `OrreryFw.astro`
+(framework-built on the scene layer, ~2800 lines), both in the lwalker.dev
+site's `src/components/figures/`, are **not** an abandoned duplicate — they're a deliberate side-by-side
 benchmark, viewable together at `/dev/orrery-compare`. Same figure, same
 interactions, same visual result; one written directly against
 `geometry.ts`/`camera.ts`/`annotate.ts`/`hover.ts`/`labels.ts`, the other

@@ -1,6 +1,6 @@
 /**
  * The ladder of galgalim, with the signs and their constellations round it —
- * the shape `components/OrreryFw.astro` is built on, reduced to what a
+ * the shape the lwalker.dev site's `OrreryFw.astro` is built on, reduced to what a
  * document can say without an ephemeris behind it.
  *
  * It is here for the three things the other examples do not reach:

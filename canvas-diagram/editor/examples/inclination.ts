@@ -1,6 +1,6 @@
 /**
  * The moon's orbit, inclined to the ecliptic — the construction
- * `components/MoonInclination.astro` is built on, as a document.
+ * the lwalker.dev site's `MoonInclination.astro` is built on, as a document.
  *
  * It is here for one field: `plane`. A sphere given a tilt and a line of nodes
  * stops being a circle and becomes a circle seen edge-on from somewhere else,
